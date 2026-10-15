@@ -405,7 +405,7 @@ pub struct KeyedOutcome {
 /// gets a keyed link, because such a person cannot be told to sign in. The
 /// provider still records the share, so it stays the authority on who may open
 /// what and withdrawing it withdraws the key.
-pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Json<ShareRequest>) -> Response {
+pub async fn share(State(app): State<Arc<App>>, session: Session, headers: HeaderMap, Json(req): Json<ShareRequest>) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     if !p.supports(craft_cloud::Capability::Sharing) {
         return fail(craft_cloud::Error::Unsupported("sharing"));
@@ -414,7 +414,12 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
     // Where a recipient with no account would land. Settled before anything is
     // shared, because a key with nowhere to go is worse than no key, and a
     // sharer told now can do something about it.
-    let landing = landing_app(&app, &app.entitlements().await.0, &session, req.app.as_deref());
+    //
+    // Prefer the app named in the body. Older browser builds omit it, so the
+    // Referer (or Origin) path is the fallback: a share from /deckcraft/ is a
+    // DeckCraft share.
+    let named = req.app.as_deref().filter(|s| !s.trim().is_empty()).map(str::to_owned).or_else(|| app_from_browser(&headers));
+    let landing = landing_app(&app, &app.entitlements().await.0, &session, named.as_deref());
     let mint = app.keyed.enabled() && landing.is_some();
 
     let req = Arc::new(req);
@@ -492,6 +497,12 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
         let mut delivery = deliver(&p, &email_invitations, &sharer, &entry.name).await.into_iter();
         for (target, url, expires) in invitations {
             let outcome = if matches!(target, ShareTarget::Email(_)) { delivery.next().unwrap_or("mail_failed") } else { "copy" };
+            // Older share dialogs ignore `keyed` and copy `shared[].url`. Put
+            // the CollabCraft invite there so they still hand out a link that
+            // opens the app. The provider share id stays for revocation.
+            if let Some(shared) = placed.shared.iter_mut().find(|share| share.target == target) {
+                shared.url = Some(url.clone());
+            }
             placed.keyed_out.push(KeyedOutcome {
                 target,
                 url,
@@ -518,6 +529,30 @@ fn landing_app(app: &App, entitled: &Permissions, session: &Session, named: Opti
         return None;
     }
     Some(name.to_owned())
+}
+
+/// The Craft app a browser request came from, when the body did not name one.
+///
+/// Apps are served as `/<slug>/…` under this deployment. The first path
+/// segment of Referer (preferred) or Origin is that slug. Anything else is
+/// ignored: landing_app still rejects names this deployment does not host.
+fn app_from_browser(headers: &HeaderMap) -> Option<String> {
+    header_text(headers, axum::http::header::REFERER)
+        .and_then(|v| app_slug_from_url(&v))
+        .or_else(|| header_text(headers, axum::http::header::ORIGIN).and_then(|v| app_slug_from_url(&v)))
+}
+
+fn header_text(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<String> {
+    headers.get(name)?.to_str().ok().map(str::to_owned)
+}
+
+fn app_slug_from_url(raw: &str) -> Option<String> {
+    let uri: axum::http::Uri = raw.parse().ok()?;
+    let slug = uri.path().trim_start_matches('/').split('/').next()?.trim();
+    if slug.is_empty() {
+        return None;
+    }
+    Some(slug.to_owned())
 }
 
 /// What one blocking pass over the provider produced.
@@ -784,4 +819,21 @@ fn cache_for(path: &str) -> Option<axum::http::HeaderValue> {
 fn has_content_hash(name: &str) -> bool {
     let stem = name.trim_end_matches(".wasm").trim_end_matches(".js").trim_end_matches("_bg");
     stem.rsplit('-').next().is_some_and(|tail| tail.len() >= 8 && tail.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_share_from_an_app_path_names_that_app() {
+        assert_eq!(app_slug_from_url("https://craft.example.net/deckcraft/").as_deref(), Some("deckcraft"));
+        assert_eq!(app_slug_from_url("https://craft.example.net/gridcraft/index.html").as_deref(), Some("gridcraft"));
+    }
+
+    #[test]
+    fn the_service_root_names_no_app() {
+        assert_eq!(app_slug_from_url("https://craft.example.net/"), None);
+        assert_eq!(app_slug_from_url("https://craft.example.net"), None);
+    }
 }
