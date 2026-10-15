@@ -18,13 +18,14 @@ pub(crate) const DESTINATION: &str = "cloud";
 ///
 /// No expiry. The dialog has no field for one, and inventing a date here would
 /// put an end on a share nobody asked to end.
-pub(crate) fn asked(grant: Grant) -> ShareRequest {
+pub(crate) fn asked(grant: Grant, app: Option<&str>) -> ShareRequest {
     ShareRequest {
         id: grant.id,
         targets: grant.targets,
         permission: grant.permission,
         note: grant.note,
         notify: grant.notify,
+        app: app.map(str::to_owned),
         password: grant.password,
         expires: None,
     }
@@ -53,7 +54,15 @@ pub(crate) fn destinations(me: Me) -> Answer {
 ///
 /// Partial success is the ordinary case. Sharing with five people where one
 /// address is wrong shares with four and names the one that failed.
-pub(crate) fn granted(outcome: ShareOutcome) -> Answer {
+pub(crate) fn granted(mut outcome: ShareOutcome) -> Answer {
+    // A keyed URL is the entry point the recipient can actually use. Keep the
+    // provider share id for revocation, but never expose its storage-manager
+    // URL when CollabCraft minted an app-scoped route for the same target.
+    for keyed in outcome.keyed {
+        if let Some(shared) = outcome.shared.iter_mut().find(|share| share.target == keyed.target) {
+            shared.url = Some(keyed.url);
+        }
+    }
     let failed = outcome.failed.into_iter().map(|f| Failure { target: f.target, code: f.code, detail: f.detail }).collect();
     Answer::Granted { shared: outcome.shared, failed }
 }

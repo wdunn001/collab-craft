@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use craft_cloud::{Capability, Permission, Share, ShareTarget};
-use craft_cloud_client::{Client, Error, Me, Request as Sent, Response, ShareFailure, ShareOutcome, Transport};
+use craft_cloud_client::{Client, Error, KeyedOutcome, Me, Request as Sent, Response, ShareFailure, ShareOutcome, Transport};
 use craft_ui::share::{Answer, Grant, Request};
 
 use crate::{answer, run};
@@ -64,19 +64,23 @@ fn me(email: Option<&str>, linked: bool) -> Me {
 
 #[test]
 fn a_grant_becomes_the_services_share_request() {
-    let asked = answer::asked(Grant {
-        password: Some("key".to_owned()),
-        id: "docs/plan.ods".to_owned(),
-        targets: vec![ShareTarget::Link],
-        permission: Permission::View,
-        note: Some("have a look".to_owned()),
-        notify: true,
-    });
+    let asked = answer::asked(
+        Grant {
+            password: Some("key".to_owned()),
+            id: "docs/plan.ods".to_owned(),
+            targets: vec![ShareTarget::Link],
+            permission: Permission::View,
+            note: Some("have a look".to_owned()),
+            notify: true,
+        },
+        Some("gridcraft"),
+    );
     assert_eq!(asked.id, "docs/plan.ods");
     assert_eq!(asked.targets, vec![ShareTarget::Link]);
     assert_eq!(asked.permission, Permission::View);
     assert_eq!(asked.note.as_deref(), Some("have a look"));
     assert!(asked.notify);
+    assert_eq!(asked.app.as_deref(), Some("gridcraft"));
     assert_eq!(asked.password.as_deref(), Some("key"));
     assert_eq!(asked.expires, None, "the dialog has no field for an expiry, and inventing one would end a share nobody asked to end");
 }
@@ -130,6 +134,7 @@ fn a_share_reports_both_halves() {
             code: "invalid".to_owned(),
             detail: "not an address".to_owned(),
         }],
+        keyed: Vec::new(),
     };
     match answer::granted(outcome) {
         Answer::Granted { shared, failed } => {
@@ -170,7 +175,7 @@ fn asking_who_has_access_names_the_document() {
 
 #[test]
 fn a_grant_is_posted_and_both_halves_come_back() {
-    let fake = Fake::one(200, r#"{"shared":[],"failed":[]}"#);
+    let fake = Fake::one(200, r#"{"shared":[],"failed":[],"keyed":[]}"#);
     let answered = run(
         &client(&fake),
         Request::Grant(Grant {
@@ -187,6 +192,38 @@ fn a_grant_is_posted_and_both_halves_come_back() {
     let body: serde_json::Value = serde_json::from_slice(&fake.last().body).unwrap();
     assert_eq!(body["targets"][0]["id"], "someone@example.net");
     assert!(matches!(answered, Answer::Granted { .. }));
+}
+
+#[test]
+fn a_keyed_link_replaces_the_provider_url_for_the_same_share() {
+    let outcome = ShareOutcome {
+        shared: vec![Share {
+            id: "ocs/1".to_owned(),
+            target: ShareTarget::Link,
+            display: None,
+            permission: Permission::View,
+            url: Some("https://cloud.example.net/s/provider".to_owned()),
+            note: None,
+            created: None,
+        }],
+        failed: Vec::new(),
+        keyed: vec![KeyedOutcome {
+            target: ShareTarget::Link,
+            url: "https://craft.example.com/invite/handle.key".to_owned(),
+            expires: 1_800_000_000,
+            uses: 1,
+            delivered: false,
+            delivery: "copy".to_owned(),
+        }],
+    };
+    match answer::granted(outcome) {
+        Answer::Granted { shared, failed } => {
+            assert!(failed.is_empty());
+            assert_eq!(shared[0].id, "ocs/1", "the provider id stays available for revocation");
+            assert_eq!(shared[0].url.as_deref(), Some("https://craft.example.com/invite/handle.key"));
+        }
+        other => panic!("expected a grant, got {other:?}"),
+    }
 }
 
 #[test]

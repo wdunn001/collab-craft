@@ -149,6 +149,12 @@ pub struct ShareRequest {
     pub permission: Permission,
     pub note: Option<String>,
     pub notify: bool,
+    /// The Craft app that opens a keyed recipient link.
+    ///
+    /// The service validates this against the deployment and the sharer's
+    /// entitlement before minting a link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     /// A key the recipient must present. Only meaningful for a link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
@@ -162,6 +168,9 @@ pub struct ShareOutcome {
     pub shared: Vec<Share>,
     /// Named rather than counted, so a dialog can say which address failed.
     pub failed: Vec<ShareFailure>,
+    /// CollabCraft entry links minted for recipients and public-link shares.
+    #[serde(default)]
+    pub keyed: Vec<KeyedOutcome>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -169,4 +178,14 @@ pub struct ShareFailure {
     pub target: ShareTarget,
     pub code: String,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct KeyedOutcome {
+    pub target: ShareTarget,
+    pub url: String,
+    pub expires: i64,
+    pub uses: u32,
+    pub delivered: bool,
+    pub delivery: String,
 }

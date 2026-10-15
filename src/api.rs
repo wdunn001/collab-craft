@@ -256,10 +256,7 @@ pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query
         match tokio::task::spawn_blocking(move || p.read(&id)).await {
             Ok(Ok(bytes)) => (
                 StatusCode::OK,
-                [
-                    (CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
-                    (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
-                ],
+                [(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")), (ACCEPT_RANGES, HeaderValue::from_static("bytes"))],
                 bytes,
             )
                 .into_response(),
@@ -441,15 +438,20 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
     let mut invitations = Vec::new();
     if let (Some(slug), Some(entry)) = (landing.as_deref(), placed.entry.clone()) {
         let exp = now_unix() + app.keyed.ttl_secs as i64;
-        for (address, share) in &placed.keyed {
+        for (target, share) in &placed.keyed {
             let key = crate::keyed::Key::mint();
             let Ok(verifier) = key.verifier(&app.secret) else {
                 placed.failed.push(ShareFailure {
-                    target: ShareTarget::Email(address.clone()),
+                    target: target.clone(),
                     code: "mint_failed",
-                    detail: "this service could not mint a key for that address".to_owned(),
+                    detail: "this service could not mint a key for that recipient".to_owned(),
                 });
                 continue;
+            };
+            let recipient = match target {
+                ShareTarget::Email(address) => address.clone(),
+                ShareTarget::Link => "Guest".to_owned(),
+                _ => continue,
             };
             let link = crate::keyed::Link {
                 verifier,
@@ -457,7 +459,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
                 doc: req.id.clone(),
                 app: slug.to_owned(),
                 permission: req.permission,
-                recipient: address.clone(),
+                recipient,
                 owner: session.user.clone(),
                 share: share.id.clone(),
                 exp,
@@ -465,9 +467,9 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
             };
             if !app.store.put_keyed_link(&key.handle, &link, app.keyed.ttl_secs).await {
                 placed.failed.push(ShareFailure {
-                    target: ShareTarget::Email(address.clone()),
+                    target: target.clone(),
                     code: "store_failed",
-                    detail: "this service could not record a key for that address".to_owned(),
+                    detail: "this service could not record a key for that recipient".to_owned(),
                 });
                 continue;
             }
@@ -476,14 +478,22 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
             // anywhere, because a log is read by people who were never given
             // the link.
             tracing::info!(link = %key.handle, room = %entry.room, app = %slug, "minted a keyed link");
-            invitations.push((address.clone(), app.keyed.url(&key), exp));
+            invitations.push((target.clone(), app.keyed.url(&key), exp));
         }
 
         let sharer = placed.sharer.clone().unwrap_or_else(|| session.display.clone());
-        let delivery = deliver(&p, &invitations, &sharer, &entry.name).await;
-        for ((address, url, expires), outcome) in invitations.into_iter().zip(delivery) {
+        let email_invitations: Vec<(String, String, i64)> = invitations
+            .iter()
+            .filter_map(|(target, url, expires)| match target {
+                ShareTarget::Email(address) => Some((address.clone(), url.clone(), *expires)),
+                _ => None,
+            })
+            .collect();
+        let mut delivery = deliver(&p, &email_invitations, &sharer, &entry.name).await.into_iter();
+        for (target, url, expires) in invitations {
+            let outcome = if matches!(target, ShareTarget::Email(_)) { delivery.next().unwrap_or("mail_failed") } else { "copy" };
             placed.keyed_out.push(KeyedOutcome {
-                target: ShareTarget::Email(address),
+                target,
                 url,
                 expires,
                 uses: app.keyed.max_uses,
@@ -514,8 +524,8 @@ fn landing_app(app: &App, entitled: &Permissions, session: &Session, named: Opti
 struct Placed {
     shared: Vec<craft_cloud::Share>,
     failed: Vec<ShareFailure>,
-    /// Address and share for every recipient who needs a keyed link.
-    keyed: Vec<(String, craft_cloud::Share)>,
+    /// Target and provider share for every recipient who needs a keyed link.
+    keyed: Vec<(ShareTarget, craft_cloud::Share)>,
     keyed_out: Vec<KeyedOutcome>,
     /// The document, for the room a key names and the name a mail mentions.
     entry: Option<craft_cloud::Entry>,
@@ -542,8 +552,9 @@ fn place(p: &(dyn Provider + Send + Sync), req: &ShareRequest, mint: bool) -> Pl
         // never taken from the request. A client naming an address proves
         // nothing about whether an account answers to it, and the answer
         // decides between two quite different kinds of share.
-        let external = match target {
-            ShareTarget::Email(address) if mint && !has_account(p, address) => Some(address.clone()),
+        let keyed = match target {
+            ShareTarget::Email(address) if mint && !has_account(p, address) => Some(target.clone()),
+            ShareTarget::Link if mint => Some(target.clone()),
             _ => None,
         };
 
@@ -552,14 +563,14 @@ fn place(p: &(dyn Provider + Send + Sync), req: &ShareRequest, mint: bool) -> Pl
             // The provider's own mail carries the provider's own link, which a
             // recipient with no account cannot use. So for a keyed target this
             // service sends the mail instead, carrying the link that works.
-            notify: req.notify && external.is_none(),
+            notify: req.notify && keyed.is_none(),
             password: req.password.clone(),
             expires: req.expires.clone(),
         };
         match p.share(&req.id, target, req.permission, &options) {
             Ok(s) => {
-                if let Some(address) = external {
-                    out.keyed.push((address, s.clone()));
+                if let Some(target) = keyed {
+                    out.keyed.push((target, s.clone()));
                 }
                 out.shared.push(s);
             }

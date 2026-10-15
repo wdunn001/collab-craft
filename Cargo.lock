@@ -306,7 +306,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud",
  "craft-nextcloud",
  "craft-webdav",
  "getrandom 0.3.4",
@@ -330,7 +330,7 @@ dependencies = [
 name = "collabcraft-share"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud",
  "craft-cloud-client",
  "craft-ui",
  "serde_json",
@@ -419,16 +419,7 @@ dependencies = [
 [[package]]
 name = "craft-cloud"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem#54cef4f385341f4f8ee68038c3fdd9349f3c7a79"
-dependencies = [
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-cloud"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=289d562cc6e8b567819aee51f759a78f41a65454#289d562cc6e8b567819aee51f759a78f41a65454"
+source = "git+https://github.com/wdunn001/craft-libs?rev=fdd732a576162d2517cad91743a7fc9cef30eece#fdd732a576162d2517cad91743a7fc9cef30eece"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -438,7 +429,7 @@ dependencies = [
 name = "craft-cloud-client"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud",
  "craft-collab",
  "js-sys",
  "log",
@@ -469,7 +460,7 @@ dependencies = [
 name = "craft-nextcloud"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud",
  "log",
  "quick-xml",
  "serde_json",
@@ -479,9 +470,9 @@ dependencies = [
 [[package]]
 name = "craft-ui"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=289d562cc6e8b567819aee51f759a78f41a65454#289d562cc6e8b567819aee51f759a78f41a65454"
+source = "git+https://github.com/wdunn001/craft-libs?rev=fdd732a576162d2517cad91743a7fc9cef30eece#fdd732a576162d2517cad91743a7fc9cef30eece"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/storytold/craft-libs?rev=289d562cc6e8b567819aee51f759a78f41a65454)",
+ "craft-cloud",
  "egui",
 ]
 

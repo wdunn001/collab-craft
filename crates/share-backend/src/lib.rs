@@ -57,12 +57,20 @@ enum Source {
 #[derive(Clone)]
 pub struct CollabCraft {
     source: Source,
+    app: Option<String>,
 }
 
 impl CollabCraft {
     /// A backend on one client, for a host that already holds a session.
     pub fn new(client: Client) -> CollabCraft {
-        CollabCraft { source: Source::Fixed(client) }
+        CollabCraft { source: Source::Fixed(client), app: None }
+    }
+
+    /// Name the Craft app that opens links minted by this backend.
+    #[must_use]
+    pub fn for_app(mut self, app: impl Into<String>) -> CollabCraft {
+        self.app = Some(app.into());
+        self
     }
 
     /// A backend that asks the host for a client each time, so a session
@@ -71,7 +79,7 @@ impl CollabCraft {
     /// `None` from the factory means there is no service configured, which
     /// leaves the dialog unavailable rather than broken.
     pub fn from_fn(make: impl Fn() -> Option<Client> + Send + Sync + 'static) -> CollabCraft {
-        CollabCraft { source: Source::Made(Arc::new(make)) }
+        CollabCraft { source: Source::Made(Arc::new(make)), app: None }
     }
 
     /// A backend from the environment around the application.
@@ -127,6 +135,7 @@ const NOTHING_CONFIGURED: &str = "no cloud service is configured";
 impl ShareBackend for CollabCraft {
     fn submit(&self, request: Request, reply: Replier) {
         let source = self.source.clone();
+        let app = self.app.clone();
         // One thread per request. The dialog debounces its autocomplete,
         // so this is a handful at a time, and a lookup that is still
         // waiting cannot hold up a share the user has already pressed.
@@ -135,7 +144,7 @@ impl ShareBackend for CollabCraft {
         let spare = reply.dup();
         let started = std::thread::Builder::new().name("craft-share".to_owned()).spawn(move || match client(&source) {
             None => reply.refuse(NOTHING_CONFIGURED),
-            Some(client) => match run(&client, request) {
+            Some(client) => match run_for(&client, request, app.as_deref()) {
                 Ok(answer) => reply.answer(answer),
                 Err(reason) => reply.refuse(reason),
             },
@@ -151,13 +160,18 @@ impl ShareBackend for CollabCraft {
 /// One request, on a thread of its own.
 #[cfg(not(target_arch = "wasm32"))]
 fn run(client: &Client, request: Request) -> Result<Answer, String> {
+    run_for(client, request, None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_for(client: &Client, request: Request, app: Option<&str>) -> Result<Answer, String> {
     use answer::say;
 
     match request {
         Request::Capabilities => Ok(answer::capabilities(client.me().map_err(say)?)),
         Request::Lookup { query, limit } => client.contacts(&query, limit).map(Answer::Lookup).map_err(say),
         Request::Access { id } => client.shares(&id).map(Answer::Access).map_err(say),
-        Request::Grant(grant) => Ok(answer::granted(client.share(&answer::asked(grant)).map_err(say)?)),
+        Request::Grant(grant) => Ok(answer::granted(client.share(&answer::asked(grant, app)).map_err(say)?)),
         Request::Withdraw { share_id } => {
             client.unshare(&share_id).map_err(say)?;
             Ok(Answer::Withdrawn { share_id })
@@ -172,13 +186,14 @@ fn run(client: &Client, request: Request) -> Result<Answer, String> {
 impl ShareBackend for CollabCraft {
     fn submit(&self, request: Request, reply: Replier) {
         let source = self.source.clone();
+        let app = self.app.clone();
         // A task rather than a thread, because a browser has neither one to
         // spare nor a way to block on one. Spawning cannot fail, so there is
         // no spare Replier to keep: every path below answers.
         wasm_bindgen_futures::spawn_local(async move {
             match client(&source) {
                 None => reply.refuse(NOTHING_CONFIGURED),
-                Some(client) => match run(&client, request).await {
+                Some(client) => match run_for(&client, request, app.as_deref()).await {
                     Ok(answer) => reply.answer(answer),
                     Err(reason) => reply.refuse(reason),
                 },
@@ -194,13 +209,18 @@ impl ShareBackend for CollabCraft {
 /// way.
 #[cfg(target_arch = "wasm32")]
 async fn run(client: &Client, request: Request) -> Result<Answer, String> {
+    run_for(client, request, None).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_for(client: &Client, request: Request, app: Option<&str>) -> Result<Answer, String> {
     use answer::say;
 
     match request {
         Request::Capabilities => Ok(answer::capabilities(client.me().await.map_err(say)?)),
         Request::Lookup { query, limit } => client.contacts(&query, limit).await.map(Answer::Lookup).map_err(say),
         Request::Access { id } => client.shares(&id).await.map(Answer::Access).map_err(say),
-        Request::Grant(grant) => Ok(answer::granted(client.share(&answer::asked(grant)).await.map_err(say)?)),
+        Request::Grant(grant) => Ok(answer::granted(client.share(&answer::asked(grant, app)).await.map_err(say)?)),
         Request::Withdraw { share_id } => {
             client.unshare(&share_id).await.map_err(say)?;
             Ok(Answer::Withdrawn { share_id })

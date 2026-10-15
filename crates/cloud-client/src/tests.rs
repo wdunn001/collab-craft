@@ -182,6 +182,7 @@ fn a_share_is_posted_as_json() {
         permission: Permission::Edit,
         note: None,
         notify: true,
+        app: Some("gridcraft".to_owned()),
         password: None,
         expires: None,
     };
@@ -195,6 +196,7 @@ fn a_share_is_posted_as_json() {
     assert_eq!(body["permission"], "edit");
     assert_eq!(body["targets"][0]["kind"], "email");
     assert_eq!(body["targets"][0]["id"], "someone@example.net");
+    assert_eq!(body["app"], "gridcraft");
     assert!(body.get("password").is_none(), "an absent key must not be sent as null: the server reads it as a key of its own");
 }
 
@@ -355,6 +357,7 @@ fn a_share_reports_what_failed_by_name() {
         permission: Permission::Edit,
         note: None,
         notify: false,
+        app: None,
         password: None,
         expires: None,
     };

@@ -1,19 +1,21 @@
 //! Tests. Every one runs against a canned transport, so none of them touch a network.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::http::{Http, Method, Request, Response};
 use crate::{Account, Contacts, Files, NewShare, Permissions, ShareKind, Shares};
 
 /// A transport that answers from a script and records what it was asked.
+#[derive(Clone)]
 struct Fake {
-    replies: RefCell<Vec<Response>>,
-    seen: RefCell<Vec<Request>>,
+    replies: Rc<RefCell<Vec<Response>>>,
+    seen: Rc<RefCell<Vec<Request>>>,
 }
 
 impl Fake {
     fn new(replies: Vec<Response>) -> Fake {
-        Fake { replies: RefCell::new(replies), seen: RefCell::new(Vec::new()) }
+        Fake { replies: Rc::new(RefCell::new(replies)), seen: Rc::new(RefCell::new(Vec::new())) }
     }
 
     fn one(status: u16, body: &str) -> Fake {
@@ -292,7 +294,7 @@ fn provider_stat_returns_entry_without_downloading_bytes() {
     use craft_cloud::Files as _;
 
     let http = Fake::one(207, &one_entry(Some("42")));
-    let cloud = crate::Nextcloud::new(acct(), http);
+    let cloud = crate::Nextcloud::new(acct(), http.clone());
     let entry = cloud.stat("/Documents/Plan.docx").expect("stat");
     assert_eq!(entry.id, "/Documents/Plan.docx");
     assert_eq!(entry.size, Some(2048));
