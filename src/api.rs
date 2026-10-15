@@ -23,10 +23,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{
-    ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, CROSS_ORIGIN_EMBEDDER_POLICY, CROSS_ORIGIN_OPENER_POLICY, CROSS_ORIGIN_RESOURCE_POLICY, ETAG,
-    RANGE,
-};
+use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, ETAG, RANGE, HeaderName};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use craft_cloud::{Permission, Provider, ShareTarget};
@@ -765,19 +762,25 @@ const RUNTIME_ASSETS: &[&str] = &[
 fn apply_cross_origin_isolation(path: &str, first_segment: &str, app: &crate::state::App, response: &mut Response) {
     let name = path.rsplit('/').next().unwrap_or(path);
     if app.isolated_apps.iter().any(|a| a == first_segment) {
-        response.headers_mut().insert(CROSS_ORIGIN_OPENER_POLICY, HeaderValue::from_static("same-origin"));
-        response
-            .headers_mut()
-            .insert(CROSS_ORIGIN_EMBEDDER_POLICY, HeaderValue::from_static("require-corp"));
+        response.headers_mut().insert(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("cross-origin-embedder-policy"),
+            HeaderValue::from_static("require-corp"),
+        );
         return;
     }
     if RUNTIME_ASSETS.iter().any(|a| *a == name) {
-        response
-            .headers_mut()
-            .insert(CROSS_ORIGIN_EMBEDDER_POLICY, HeaderValue::from_static("require-corp"));
-        response
-            .headers_mut()
-            .insert(CROSS_ORIGIN_RESOURCE_POLICY, HeaderValue::from_static("same-origin"));
+        response.headers_mut().insert(
+            HeaderName::from_static("cross-origin-embedder-policy"),
+            HeaderValue::from_static("require-corp"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
     }
 }
 
