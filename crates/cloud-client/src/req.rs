@@ -93,6 +93,17 @@ pub fn read(id: &str) -> Call<Vec<u8>> {
     Call::raw(get(format!("{API}/files/content?id={}", enc(id))))
 }
 
+/// Ranged read via `Range: bytes=…` on the content route.
+pub fn read_range(id: &str, offset: u64, length: u64) -> Call<Vec<u8>> {
+    let last = offset.saturating_add(length.saturating_sub(1));
+    Call::raw(get(format!("{API}/files/content?id={}", enc(id))).header("range", format!("bytes={offset}-{last}")))
+}
+
+/// Metadata without downloading bytes (`GET /files/meta`).
+pub fn stat(id: &str) -> Call<Entry> {
+    Call::json(get(format!("{API}/files/meta?id={}", enc(id))))
+}
+
 /// Save, refusing to overwrite a newer version when `if_match` is given.
 pub fn write(id: &str, bytes: &[u8], if_match: Option<&str>) -> Call<Entry> {
     Call::json(sending(Method::Put, format!("{API}/files/content?id={}{}", enc(id), tag(if_match)), bytes))

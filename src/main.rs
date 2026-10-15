@@ -222,6 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/files", axum::routing::get(api::list))
         .route("/files/shared", axum::routing::get(api::shared_with_me))
         .route("/files/content", axum::routing::get(api::read).put(api::write))
+        .route("/files/meta", axum::routing::get(api::file_meta))
         .route("/files/new", axum::routing::post(api::create))
         .route("/contacts", axum::routing::get(api::contacts))
         .route("/conversation", axum::routing::get(api::conversation))

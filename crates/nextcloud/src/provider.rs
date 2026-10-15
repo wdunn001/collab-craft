@@ -212,6 +212,10 @@ impl<H: Http> craft_cloud::Files for Nextcloud<H> {
         self.files().get(&self.http, id).map_err(lift)
     }
 
+    fn read_range(&self, id: &str, offset: u64, length: u64) -> CloudResult<Vec<u8>> {
+        self.files().get_range(&self.http, id, offset, length).map(|r| r.bytes).map_err(lift)
+    }
+
     fn write(&self, id: &str, bytes: &[u8], if_match: Option<&str>) -> CloudResult<CloudEntry> {
         self.files().put(&self.http, id, bytes.to_vec(), if_match).map_err(lift)?;
         craft_cloud::Files::stat(self, id)
