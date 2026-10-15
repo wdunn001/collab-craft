@@ -23,7 +23,10 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, ETAG, RANGE};
+use axum::http::header::{
+    ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, CROSS_ORIGIN_EMBEDDER_POLICY, CROSS_ORIGIN_OPENER_POLICY, CROSS_ORIGIN_RESOURCE_POLICY, ETAG,
+    RANGE,
+};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use craft_cloud::{Permission, Provider, ShareTarget};
@@ -730,6 +733,7 @@ pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axu
             if let Some(value) = cache_for(&path) {
                 response.headers_mut().insert(axum::http::header::CACHE_CONTROL, value);
             }
+            apply_cross_origin_isolation(&path, &first, &app, &mut response);
             response
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "static", detail: e.to_string() })).into_response(),
@@ -749,6 +753,34 @@ pub async fn apps(State(app): State<Arc<App>>, session: Session) -> Response {
 /// wasm-bindgen directly and emit plain names, as do the shared workers.
 /// Marking one of those immutable means a redeploy never reaches anybody who
 /// has already visited.
+const RUNTIME_ASSETS: &[&str] = &[
+    "craft-worker-host.js",
+    "craft-worker-host-routing.js",
+    "craft-dedicated-worker.js",
+    "opfs-flush.js",
+    "fs-access-host.js",
+];
+
+/// COOP/COEP for wasm threads (see homelab RFC coop-coep-craft-web.md).
+fn apply_cross_origin_isolation(path: &str, first_segment: &str, app: &crate::state::App, response: &mut Response) {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if app.isolated_apps.iter().any(|a| a == first_segment) {
+        response.headers_mut().insert(CROSS_ORIGIN_OPENER_POLICY, HeaderValue::from_static("same-origin"));
+        response
+            .headers_mut()
+            .insert(CROSS_ORIGIN_EMBEDDER_POLICY, HeaderValue::from_static("require-corp"));
+        return;
+    }
+    if RUNTIME_ASSETS.iter().any(|a| *a == name) {
+        response
+            .headers_mut()
+            .insert(CROSS_ORIGIN_EMBEDDER_POLICY, HeaderValue::from_static("require-corp"));
+        response
+            .headers_mut()
+            .insert(CROSS_ORIGIN_RESOURCE_POLICY, HeaderValue::from_static("same-origin"));
+    }
+}
+
 fn cache_for(path: &str) -> Option<axum::http::HeaderValue> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let value = if name.is_empty() || name.ends_with(".html") {

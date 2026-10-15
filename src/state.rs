@@ -157,6 +157,8 @@ pub struct App {
     /// Directory names under the web root, which are the apps this deployment
     /// actually hosts. Read once at startup rather than from disk per request.
     pub hosted: Vec<String>,
+    /// Apps that receive cross-origin isolation headers (COOP/COEP) for wasm threads.
+    pub isolated_apps: Vec<String>,
     /// Whether this deployment mints keyed links, and on what terms.
     pub keyed: crate::keyed::Policy,
 }

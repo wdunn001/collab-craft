@@ -286,6 +286,7 @@ mod keyed_links {
             http: reqwest::Client::new(),
             web: tower_http::services::ServeDir::new("."),
             hosted: vec!["gridcraft".to_owned(), "wordcraft".to_owned()],
+            isolated_apps: vec![],
             keyed,
         }
     }
@@ -816,6 +817,7 @@ mod web {
             http: reqwest::Client::new(),
             web: tower_http::services::ServeDir::new("."),
             hosted: hosted.iter().map(|a| (*a).to_owned()).collect(),
+            isolated_apps: vec![],
             keyed: Policy::decide(None, "https://craft.example.com", None, None),
         }
     }

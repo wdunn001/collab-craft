@@ -178,12 +178,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !web_root.is_empty() {
         tracing::info!(count = hosted.len(), "browser builds hosted");
     }
+    let isolated_apps: Vec<String> = std::env::var("COLLABCRAFT_ISOLATED_APPS")
+        .unwrap_or_else(|_| "effectcraft,filmcraft,lightcraft".into())
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !isolated_apps.is_empty() {
+        tracing::info!(apps = ?isolated_apps, "cross-origin isolated app prefixes");
+    }
     let app_state = Arc::new(state::App {
         // Precompressed on disk, sent with the Content-Encoding header.
         // Brotli at a high level costs minutes per wasm bundle, which is
         // unaffordable per request and free once at deploy.
         web: tower_http::services::ServeDir::new(&web_root).precompressed_br().precompressed_gzip(),
         hosted,
+        isolated_apps,
         secret: secret_bytes,
         relay_url: std::env::var("COLLABCRAFT_PUBLIC_RELAY").unwrap_or_else(|_| format!("http://{bind}")),
         settings: settings::Settings::from_env(),
