@@ -306,7 +306,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=1d4ffc10b0714ebc113e9301a84ac59476e4a27e)",
  "craft-nextcloud",
  "getrandom 0.3.4",
  "hmac",
@@ -329,7 +329,7 @@ dependencies = [
 name = "collabcraft-share"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=1d4ffc10b0714ebc113e9301a84ac59476e4a27e)",
  "craft-cloud-client",
  "craft-ui",
  "serde_json",
@@ -418,7 +418,7 @@ dependencies = [
 [[package]]
 name = "craft-cloud"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem#54cef4f385341f4f8ee68038c3fdd9349f3c7a79"
+source = "git+https://github.com/wdunn001/craft-libs?rev=1d4ffc10b0714ebc113e9301a84ac59476e4a27e#1d4ffc10b0714ebc113e9301a84ac59476e4a27e"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -437,7 +437,7 @@ dependencies = [
 name = "craft-cloud-client"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=1d4ffc10b0714ebc113e9301a84ac59476e4a27e)",
  "craft-collab",
  "js-sys",
  "log",
@@ -468,7 +468,7 @@ dependencies = [
 name = "craft-nextcloud"
 version = "0.1.0"
 dependencies = [
- "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?branch=expand-craft-gpu-ecosystem)",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=1d4ffc10b0714ebc113e9301a84ac59476e4a27e)",
  "log",
  "quick-xml",
  "serde_json",
