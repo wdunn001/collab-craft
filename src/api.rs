@@ -23,7 +23,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, ETAG, RANGE, HeaderName};
+use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderName, RANGE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use craft_cloud::{Permission, Provider, ShareTarget};
@@ -256,10 +256,7 @@ pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query
         match tokio::task::spawn_blocking(move || p.read(&id)).await {
             Ok(Ok(bytes)) => (
                 StatusCode::OK,
-                [
-                    (CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
-                    (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
-                ],
+                [(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")), (ACCEPT_RANGES, HeaderValue::from_static("bytes"))],
                 bytes,
             )
                 .into_response(),
@@ -755,37 +752,20 @@ pub async fn apps(State(app): State<Arc<App>>, session: Session) -> Response {
 /// wasm-bindgen directly and emit plain names, as do the shared workers.
 /// Marking one of those immutable means a redeploy never reaches anybody who
 /// has already visited.
-const RUNTIME_ASSETS: &[&str] = &[
-    "craft-worker-host.js",
-    "craft-worker-host-routing.js",
-    "craft-dedicated-worker.js",
-    "opfs-flush.js",
-    "fs-access-host.js",
-];
+const RUNTIME_ASSETS: &[&str] =
+    &["craft-worker-host.js", "craft-worker-host-routing.js", "craft-dedicated-worker.js", "opfs-flush.js", "fs-access-host.js"];
 
 /// COOP/COEP for wasm threads (see homelab RFC coop-coep-craft-web.md).
 fn apply_cross_origin_isolation(path: &str, first_segment: &str, app: &crate::state::App, response: &mut Response) {
     let name = path.rsplit('/').next().unwrap_or(path);
     if app.isolated_apps.iter().any(|a| a == first_segment) {
-        response.headers_mut().insert(
-            HeaderName::from_static("cross-origin-opener-policy"),
-            HeaderValue::from_static("same-origin"),
-        );
-        response.headers_mut().insert(
-            HeaderName::from_static("cross-origin-embedder-policy"),
-            HeaderValue::from_static("require-corp"),
-        );
+        response.headers_mut().insert(HeaderName::from_static("cross-origin-opener-policy"), HeaderValue::from_static("same-origin"));
+        response.headers_mut().insert(HeaderName::from_static("cross-origin-embedder-policy"), HeaderValue::from_static("require-corp"));
         return;
     }
     if RUNTIME_ASSETS.iter().any(|a| *a == name) {
-        response.headers_mut().insert(
-            HeaderName::from_static("cross-origin-embedder-policy"),
-            HeaderValue::from_static("require-corp"),
-        );
-        response.headers_mut().insert(
-            HeaderName::from_static("cross-origin-resource-policy"),
-            HeaderValue::from_static("same-origin"),
-        );
+        response.headers_mut().insert(HeaderName::from_static("cross-origin-embedder-policy"), HeaderValue::from_static("require-corp"));
+        response.headers_mut().insert(HeaderName::from_static("cross-origin-resource-policy"), HeaderValue::from_static("same-origin"));
     }
 }
 
