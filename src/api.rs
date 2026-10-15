@@ -415,12 +415,22 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, headers: Heade
     // shared, because a key with nowhere to go is worse than no key, and a
     // sharer told now can do something about it.
     //
-    // Prefer the app named in the body. Older browser builds omit it, so the
-    // Referer (or Origin) path is the fallback: a share from /deckcraft/ is a
-    // DeckCraft share.
-    let named = req.app.as_deref().filter(|s| !s.trim().is_empty()).map(str::to_owned).or_else(|| app_from_browser(&headers));
+    // Prefer the app named in the body. Older browser builds omit it. Share
+    // calls often come from a worker with no Referer, so the app cookie set
+    // when the page was served is next, then Referer / Origin / X-Craft-App.
+    let named = req
+        .app
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| header_text(&headers, axum::http::HeaderName::from_static("x-craft-app")))
+        .or_else(|| cookie_value(&headers, crate::session::APP_COOKIE))
+        .or_else(|| app_from_browser(&headers));
     let landing = landing_app(&app, &app.entitlements().await.0, &session, named.as_deref());
     let mint = app.keyed.enabled() && landing.is_some();
+    if app.keyed.enabled() && landing.is_none() {
+        tracing::warn!(asked = ?req.app, "share has no landing app; keyed CollabCraft links were not minted");
+    }
 
     let req = Arc::new(req);
     let placing = tokio::task::spawn_blocking({
@@ -458,6 +468,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, headers: Heade
                 ShareTarget::Link => "Guest".to_owned(),
                 _ => continue,
             };
+            let invite_url = app.keyed.url(&key);
             let link = crate::keyed::Link {
                 verifier,
                 room: entry.room.clone(),
@@ -469,6 +480,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, headers: Heade
                 share: share.id.clone(),
                 exp,
                 max_uses: app.keyed.max_uses,
+                invite_url: Some(invite_url.clone()),
             };
             if !app.store.put_keyed_link(&key.handle, &link, app.keyed.ttl_secs).await {
                 placed.failed.push(ShareFailure {
@@ -483,7 +495,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, headers: Heade
             // anywhere, because a log is read by people who were never given
             // the link.
             tracing::info!(link = %key.handle, room = %entry.room, app = %slug, "minted a keyed link");
-            invitations.push((target.clone(), app.keyed.url(&key), exp));
+            invitations.push((target.clone(), invite_url, exp));
         }
 
         let sharer = placed.sharer.clone().unwrap_or_else(|| session.display.clone());
@@ -543,7 +555,21 @@ fn app_from_browser(headers: &HeaderMap) -> Option<String> {
 }
 
 fn header_text(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<String> {
-    headers.get(name)?.to_str().ok().map(str::to_owned)
+    headers.get(name)?.to_str().ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        let (k, v) = part.split_once('=')?;
+        if k.trim() == name {
+            let value = v.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn app_slug_from_url(raw: &str) -> Option<String> {
@@ -681,7 +707,27 @@ fn now_unix() -> i64 {
 
 pub async fn shares(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    run(move || p.shares(&q.id)).await
+    let id = q.id.clone();
+    let listed = tokio::task::spawn_blocking(move || p.shares(&id)).await;
+    match listed {
+        Ok(Ok(mut shares)) => {
+            // The dialog's "Copy link" reads this list after a grant. Replace
+            // provider storage-manager URLs with the CollabCraft invite that
+            // was minted for the same share, when one still exists.
+            for share in &mut shares {
+                if let Some(url) = invite_url_for_share(&app, &share.id).await {
+                    share.url = Some(url);
+                }
+            }
+            Json(shares).into_response()
+        }
+        Ok(Err(e)) => fail(e),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
+    }
+}
+
+async fn invite_url_for_share(app: &App, share_id: &str) -> Option<String> {
+    app.store.keyed_links_for_share(share_id).await.into_iter().find_map(|link| link.invite_url)
 }
 
 /// Withdraw one share.
@@ -776,6 +822,14 @@ pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axu
             if let Some(value) = cache_for(&path) {
                 response.headers_mut().insert(axum::http::header::CACHE_CONTROL, value);
             }
+            // Remember which app this browser is in. Share requests from a
+            // worker carry cookies but not a Referer, and keyed links need
+            // the app name to mint.
+            if app.is_app(&first)
+                && let Ok(value) = HeaderValue::from_str(&format!("{}={first}; Path=/; SameSite=Lax; Secure", crate::session::APP_COOKIE))
+            {
+                response.headers_mut().append(axum::http::header::SET_COOKIE, value);
+            }
             response
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "static", detail: e.to_string() })).into_response(),
@@ -835,5 +889,12 @@ mod tests {
     fn the_service_root_names_no_app() {
         assert_eq!(app_slug_from_url("https://craft.example.net/"), None);
         assert_eq!(app_slug_from_url("https://craft.example.net"), None);
+    }
+
+    #[test]
+    fn the_app_cookie_names_the_open_build() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::COOKIE, HeaderValue::from_static("collabcraft_session=abc; collabcraft_app=deckcraft"));
+        assert_eq!(cookie_value(&headers, crate::session::APP_COOKIE).as_deref(), Some("deckcraft"));
     }
 }

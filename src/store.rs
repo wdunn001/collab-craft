@@ -313,6 +313,19 @@ impl Store {
         serde_json::from_str(&body).ok()
     }
 
+    /// Every keyed link minted from one provider share.
+    pub async fn keyed_links_for_share(&self, share: &str) -> Vec<crate::keyed::Link> {
+        let Some(mut c) = self.conn().await else { return Vec::new() };
+        let handles: Vec<String> = c.smembers(self.keyed_share_key(share)).await.unwrap_or_default();
+        let mut links = Vec::new();
+        for handle in handles {
+            if let Some(link) = self.keyed_link(&handle).await {
+                links.push(link);
+            }
+        }
+        links
+    }
+
     /// How many times a key has been spent.
     ///
     /// An absent counter means none, which is also what a fresh link looks

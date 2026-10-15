@@ -302,6 +302,7 @@ mod keyed_links {
             share: "share-99".to_owned(),
             exp,
             max_uses,
+            invite_url: None,
         }
     }
 
@@ -772,6 +773,7 @@ mod keyed_links {
             share: "share-planted".to_owned(),
             exp: now + 3600,
             max_uses: 1,
+            invite_url: None,
         };
         assert!(store.put_keyed_link(&key.handle, &link, 3600).await);
         std::fs::write(&out, key.wire()).expect("the key is written where the shell can read it");

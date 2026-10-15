@@ -271,6 +271,13 @@ pub struct Link {
     pub exp: i64,
     /// How many times the key may be spent.
     pub max_uses: u32,
+    /// The CollabCraft invite URL handed out when this key was minted.
+    ///
+    /// Kept so "who has access" can show the same link the sharer copied,
+    /// instead of the provider's storage-manager URL. Absent on records
+    /// minted before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_url: Option<String>,
 }
 
 /// Whether a key may be spent, and for what at most.

@@ -35,6 +35,13 @@ pub const COOKIE: &str = "collabcraft_session";
 /// that.
 pub const GUEST_COOKIE: &str = "collabcraft_guest";
 
+/// Which Craft app a browser last opened under this service.
+///
+/// Set when a hosted app asset is served. Share requests often come from a
+/// worker, which has no Referer, so the cookie is how those requests still
+/// name the app that should open a keyed recipient link.
+pub const APP_COOKIE: &str = "collabcraft_app";
+
 /// Who is making a request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
