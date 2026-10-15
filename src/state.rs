@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use craft_cloud::{Permission, Provider};
 use craft_nextcloud::{Account, Nextcloud};
+use craft_webdav::WebDav;
 
 use crate::session::Session;
 use crate::transport::ReqwestHttp;
@@ -240,13 +241,12 @@ impl App {
     /// recipient never holds a credential of any kind.
     pub async fn provider_for_owner(&self, user: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
         let (config, _) = self.provider_config().await?;
-        if config.kind != "nextcloud" {
-            tracing::error!(kind = %config.kind, "this service does not implement that kind of provider");
-            return None;
-        }
         let link = self.store.provider_link(user).await?;
-        let account = Account::new(config.base, link.user, link.password);
-        Some(Arc::new(Nextcloud::new(account, ReqwestHttp::default())))
+        let provider = provider_from(&config, &link.user, &link.password);
+        if provider.is_none() {
+            tracing::error!(kind = %config.kind, "this service does not implement that kind of provider");
+        }
+        provider
     }
 
     /// Sign a relay token for one room.
@@ -261,5 +261,31 @@ impl App {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         crate::token::sign_at(&self.secret, room, &session.user, &session.display, matches!(permission, Permission::Edit), &peer, now)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// A provider of the configured kind, acting as one account.
+///
+/// The one place a kind becomes an implementation. Everything above here holds
+/// a `dyn Provider` and never learns which it got.
+pub fn provider_from(config: &crate::settings::ProviderConfig, user: &str, password: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
+    match config.kind.as_str() {
+        "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
+        "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
+        "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp::default()))),
+        _ => None,
+    }
+}
+
+/// Check a login name and password against the configured provider.
+///
+/// Used where a kind has no browser sign-in of its own. Nothing is stored
+/// until the server has accepted the credential, so a typo is refused on the
+/// spot and never turns into a link that fails on every later request.
+pub async fn verify_link(config: &crate::settings::ProviderConfig, user: &str, password: &str) -> Result<(), craft_cloud::Error> {
+    let provider = provider_from(config, user, password).ok_or(craft_cloud::Error::Unsupported("this kind of provider"))?;
+    match tokio::task::spawn_blocking(move || craft_cloud::Accounts::me(provider.as_ref()).map(|_| ())).await {
+        Ok(answer) => answer,
+        Err(e) => Err(craft_cloud::Error::Unreachable(e.to_string())),
     }
 }

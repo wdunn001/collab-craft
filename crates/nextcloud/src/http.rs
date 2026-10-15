@@ -23,6 +23,7 @@ pub enum Method {
     Mkcol,
     Lock,
     Unlock,
+    Options,
 }
 
 impl Method {
@@ -38,6 +39,7 @@ impl Method {
             Method::Mkcol => "MKCOL",
             Method::Lock => "LOCK",
             Method::Unlock => "UNLOCK",
+            Method::Options => "OPTIONS",
         }
     }
 }

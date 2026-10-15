@@ -308,6 +308,7 @@ dependencies = [
  "base64 0.23.1",
  "craft-cloud",
  "craft-nextcloud",
+ "craft-webdav",
  "getrandom 0.3.4",
  "hmac",
  "redis",
@@ -473,6 +474,15 @@ source = "git+https://github.com/storytold/craft-libs?rev=289d562cc6e8b567819aee
 dependencies = [
  "craft-cloud",
  "egui",
+]
+
+[[package]]
+name = "craft-webdav"
+version = "0.1.0"
+dependencies = [
+ "craft-cloud",
+ "craft-nextcloud",
+ "log",
 ]
 
 [[package]]

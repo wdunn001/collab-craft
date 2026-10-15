@@ -123,8 +123,44 @@ linking storage authenticates at their own provider and has to be sent there.
 notifications, mail, accounts. None of it names a vendor. None of it has to. Files are WebDAV, contacts are CardDAV, calendars are CalDAV. Only
 sharing and notification are vendor-shaped. Both are small.
 
-`craft-nextcloud` is one implementation. A second is an implementation of six
-traits, with no change to this service and none to any app.
+Three kinds ship, chosen with `COLLABCRAFT_PROVIDER_KIND` or on
+`/settings/provider`:
+
+| Kind | Address | Linking | What works |
+|---|---|---|---|
+| `nextcloud` | server root | Nextcloud's own browser sign-in | everything: files, sharing, contacts, Talk, Mail |
+| `owncloud` | server root | login name and app password | files, sharing, shared-with-me, contacts. No Talk, Mail or notifications |
+| `webdav` | the files address, `{user}` where the login name goes | login name and app password or token | files with etag-checked saves and co-editing. Contacts where a CardDAV address is given. No sharing |
+
+`webdav` is any server speaking [RFC 4918]: SabreDAV, Apache `mod_dav`, nginx,
+Seafile's SeafDAV, a Synology or QNAP, ownCloud Infinite Scale, `rclone serve
+webdav`. Its contacts come from any CardDAV server, Baïkal and Radicale
+included, through `COLLABCRAFT_PROVIDER_CONTACTS_URL`. A few addresses to start
+from:
+
+| Server | Files address |
+|---|---|
+| ownCloud Infinite Scale | `https://ocis.example.com/remote.php/dav/files/{user}` |
+| Seafile | `https://seafile.example.com/seafdav` |
+| Synology | `https://nas.example.com:5006/home` |
+| SabreDAV, Apache, nginx, rclone | wherever the server mounts it |
+
+Plain WebDAV keys a co-editing room on the path unless the server reports a
+file id. Renaming a document while people are in it splits the room there.
+A save refuses to overwrite a newer version only where the server honours
+`If-Match`. Apache, SabreDAV and Nextcloud do. `rclone serve webdav` does not,
+so a save there can overwrite somebody else's.
+
+A kind without a browser sign-in is linked with a login name and an app
+password. The service asks the server to accept them before storing anything.
+That means this service holds the credential, as it does the Nextcloud one. Use
+a password the server lets you revoke on its own.
+
+`craft-nextcloud` implements the first two. `craft-webdav` implements the
+third over the same WebDAV and CardDAV code. Another kind is an implementation
+of six traits and one line in `state::provider_from`, with no change to any app.
+
+[RFC 4918]: https://www.rfc-editor.org/rfc/rfc4918
 
 What a provider can actually do is reported, never assumed. An administrator
 who forbids public links gets no Copy link button. The alternative is a button

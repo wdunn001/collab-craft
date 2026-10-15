@@ -19,10 +19,23 @@ use crate::session::Session;
 
 /// The provider implementations this binary speaks.
 ///
-/// One today. The list lives here so the setup page can offer a choice out of
-/// what the binary actually implements. Anything else is refused at the point
-/// of saving.
-pub const KINDS: [&str; 1] = ["nextcloud"];
+/// The list lives here so the setup page can offer a choice out of what the
+/// binary actually implements. Anything else is refused at the point of saving.
+///
+/// `webdav` is every server speaking RFC 4918, which is most of them: SabreDAV,
+/// Apache, nginx, Seafile, a NAS, ownCloud Infinite Scale. It has no sharing,
+/// so the share controls disappear and everything else works.
+pub const KINDS: [&str; 3] = ["nextcloud", "owncloud", "webdav"];
+
+/// What to call a kind in a heading.
+pub fn kind_label(kind: &str) -> String {
+    match kind {
+        "nextcloud" => "Nextcloud".to_owned(),
+        "owncloud" => "ownCloud".to_owned(),
+        "webdav" => "WebDAV".to_owned(),
+        other => crate::pages::capitalise(other),
+    }
+}
 
 /// Which provider answers, and where it lives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +44,14 @@ pub struct ProviderConfig {
     /// logs, never as a label for a user.
     pub kind: String,
     /// The server root, as `https://cloud.example.com`.
+    ///
+    /// For `webdav`, the files root instead, which may carry `{user}` where
+    /// the server puts the login name, as `https://dav.example.com/files/{user}`.
     pub base: String,
+    /// The CardDAV address-book home, for `webdav` only. The other kinds
+    /// know where their own address books are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<String>,
 }
 
 impl ProviderConfig {
@@ -58,12 +78,41 @@ impl ProviderConfig {
         if rest.contains(['@', '?', '#', ' ']) {
             return Err("the address has to be a plain server address, with no credential, no query and no fragment");
         }
-        Ok(ProviderConfig { kind, base })
+        Ok(ProviderConfig { kind, base, contacts: None })
+    }
+
+    /// Add an address-book home, checked the same way as the address.
+    ///
+    /// Empty means none. Only `webdav` reads it, so on any other kind it is
+    /// dropped rather than stored to confuse a later reader.
+    pub fn with_contacts(mut self, raw: &str) -> Result<ProviderConfig, &'static str> {
+        let raw = raw.trim();
+        if raw.is_empty() || self.kind != "webdav" {
+            self.contacts = None;
+            return Ok(self);
+        }
+        let checked = ProviderConfig::parse(&self.kind, raw).map_err(|_| "the address-book address has to be a plain https:// or http:// address")?;
+        self.contacts = Some(checked.base);
+        Ok(self)
     }
 
     /// What to call this provider in a heading.
     pub fn label(&self) -> String {
-        crate::pages::capitalise(&self.kind)
+        kind_label(&self.kind)
+    }
+
+    /// Whether linking goes through the provider's own browser sign-in.
+    ///
+    /// Only Nextcloud has one that hands a client a credential (Login Flow
+    /// v2). Every other kind is linked with a login name and an app password
+    /// or token, which this service checks against the server before storing.
+    pub fn uses_login_flow(&self) -> bool {
+        self.kind == "nextcloud"
+    }
+
+    /// Where a `webdav` server keeps things.
+    pub fn layout(&self) -> craft_webdav::Layout {
+        craft_webdav::Layout::new(self.base.clone(), self.contacts.clone())
     }
 }
 
@@ -92,11 +141,15 @@ impl Settings {
     /// Read `COLLABCRAFT_PROVIDER_URL`, `COLLABCRAFT_PROVIDER_KIND` and
     /// `COLLABCRAFT_ADMIN_GROUPS`.
     pub fn from_env() -> Settings {
-        Settings::decide(
+        let mut settings = Settings::decide(
             var("COLLABCRAFT_PROVIDER_URL").as_deref(),
             var("COLLABCRAFT_PROVIDER_KIND").as_deref(),
             var("COLLABCRAFT_ADMIN_GROUPS").as_deref(),
-        )
+        );
+        if let Some(contacts) = var("COLLABCRAFT_PROVIDER_CONTACTS_URL") {
+            settings.env = settings.env.map(|env| env.clone().with_contacts(&contacts).unwrap_or(env));
+        }
+        settings
     }
 
     /// The same decision over values.
@@ -153,11 +206,12 @@ impl Settings {
 
 /// Whether a provider answers at an address.
 ///
-/// Asks for the beginning of the provider's own desktop login flow. That needs
-/// no credential and no account, and a server answering it is reachable,
-/// speaks the protocol and is willing to issue a credential. Proving all three
-/// before the address is saved is the point: an address that only fails later
-/// fails for every user at once.
+/// Nextcloud is asked for the beginning of its own desktop login flow. That
+/// needs no credential and no account, and a server answering it is reachable,
+/// speaks the protocol and is willing to issue a credential. ownCloud has no
+/// such flow and is asked for its `status.php` instead. A WebDAV server is
+/// asked `OPTIONS`. Proving it before the address is saved is the point: an
+/// address that only fails later fails for every user at once.
 ///
 /// What the provider hands back is dropped here. The flow is abandoned, and
 /// the poll token it carries is never logged and never rendered.
@@ -165,6 +219,13 @@ pub async fn probe(config: &ProviderConfig) -> Result<(), String> {
     let config = config.clone();
     let probing = tokio::task::spawn_blocking(move || match config.kind.as_str() {
         "nextcloud" => craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &config.base).map(|_| ()).map_err(|e| e.to_string()),
+        "owncloud" => match craft_nextcloud::status(&crate::transport::ReqwestHttp::default(), &config.base) {
+            Ok(s) if !s.installed => Err("the server answered and is not installed yet".to_owned()),
+            Ok(s) if s.maintenance => Err("the server answered and is in maintenance mode".to_owned()),
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        },
+        "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp::default(), &config.layout()),
         other => Err(format!("this service does not implement a {other} provider")),
     })
     .await;

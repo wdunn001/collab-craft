@@ -433,10 +433,15 @@ pub async fn account(State(app): State<Arc<App>>, session: Option<Session>, Quer
         (None, Some(_)) => {
             // The provider is named nowhere here. A user about to link is sent to it and sees it there, which is
             // their own choice. The address itself is for the group entitled to change it.
-            body.push_str(
-                "<p>No storage is linked yet. Linking one lets this deployment open and save your documents in your own cloud. \
-                 You authenticate at your own provider. This service never sees your password.</p>",
-            );
+            let how = match &provider {
+                Some((config, _)) if !config.uses_login_flow() => {
+                    "You give it a login name and an app password, which you can revoke at your server on its own."
+                }
+                _ => "You authenticate at your own provider. This service never sees your password.",
+            };
+            body.push_str(&format!(
+                "<p>No storage is linked yet. Linking one lets this deployment open and save your documents in your own cloud. {how}</p>"
+            ));
             body.push_str(&format!(
                 "<div class=\"row\"><form class=\"inline\" method=\"post\" action=\"/account/link\">{}\
                  <button class=\"btn\" type=\"submit\">Link storage</button></form></div>",
@@ -526,6 +531,10 @@ pub async fn link_begin(State(app): State<Arc<App>>, session: Session, Form(form
         ))
         .into_response();
     };
+
+    if !config.uses_login_flow() {
+        return Html(layout("Link your storage", Some(&session), &password_form(&app, &session, &config, "", None))).into_response();
+    }
 
     let base = config.base.clone();
     let begun = tokio::task::spawn_blocking(move || craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &base)).await;
@@ -618,6 +627,82 @@ pub async fn link_finish(State(app): State<Arc<App>>, session: Session, Form(for
     }
 }
 
+/// What somebody types to link a server with no browser sign-in of its own.
+#[derive(Deserialize)]
+pub struct PasswordLinkForm {
+    #[serde(default)]
+    csrf: String,
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    password: String,
+}
+
+/// The form for linking with a login name and an app password.
+///
+/// The password field is never filled back in. A refused attempt shows the
+/// name again and asks for the password afresh.
+fn password_form(app: &App, session: &Session, config: &crate::settings::ProviderConfig, user: &str, refused: Option<&str>) -> String {
+    let token = csrf(&app.secret, &session.user);
+    let mut body = String::new();
+    if let Some(refused) = refused {
+        body.push_str(&format!("<p class=\"strip bad\">{}</p>", escape(refused)));
+    }
+    body.push_str(&format!(
+        "<h1>Link your storage</h1><p class=\"lede\">{label} has no sign-in page that hands this service a credential. \
+         Give it a login name and an app password instead.</p><section class=\"panel\">\
+         <form method=\"post\" action=\"/account/link/password\">{csrf}\
+         <label for=\"user\">Login name</label>\
+         <input id=\"user\" name=\"user\" autocomplete=\"username\" spellcheck=\"false\" value=\"{user}\">\
+         <label for=\"password\">App password</label>\
+         <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"off\">\
+         <p class=\"hint\">Create an app password or a token in your server's own security settings wherever it offers one. \
+         It can be revoked there on its own, without changing your real password. \
+         The server is asked to accept it before anything is stored.</p>\
+         <div class=\"row\"><button class=\"btn\" type=\"submit\">Link</button>\
+         <a class=\"btn quiet\" href=\"/account\">Cancel</a></div></form></section>",
+        label = escape(&config.label()),
+        csrf = hidden_csrf(&token),
+        user = escape(user),
+    ));
+    body
+}
+
+/// Link with a login name and an app password, once the server accepts them.
+pub async fn link_password(State(app): State<Arc<App>>, session: Session, Form(form): Form<PasswordLinkForm>) -> Response {
+    if !csrf_ok(&app.secret, &session.user, &form.csrf) {
+        return stale(&session);
+    }
+    if session.is_guest() {
+        return Redirect::to("/account").into_response();
+    }
+    let Some((config, _)) = app.provider_config().await else {
+        return Redirect::to("/account").into_response();
+    };
+    let user = form.user.trim().to_owned();
+    let refuse = |detail: &str| {
+        let body = password_form(&app, &session, &config, &user, Some(detail));
+        (StatusCode::BAD_REQUEST, Html(layout("Link your storage", Some(&session), &body))).into_response()
+    };
+    if user.is_empty() || form.password.is_empty() {
+        return refuse("Both a login name and a password are needed.");
+    }
+    match crate::state::verify_link(&config, &user, &form.password).await {
+        Ok(()) => {}
+        Err(craft_cloud::Error::Unauthenticated) => return refuse("The server did not accept that login name and password."),
+        Err(e) => {
+            tracing::warn!(error = %e, "the provider would not confirm a credential");
+            return refuse("The server did not answer as expected. Try again. Tell whoever runs this deployment if it keeps happening.");
+        }
+    }
+    let link = crate::store::ProviderLink { user, password: form.password };
+    if !app.store.put_provider_link(&session.user, &link).await {
+        return Redirect::to("/account?said=link_failed").into_response();
+    }
+    tracing::info!(user = %session.user, kind = %config.kind, "storage linked with an app password");
+    Redirect::to("/account?said=linked").into_response()
+}
+
 /// Forget the linked account.
 pub async fn unlink(State(app): State<Arc<App>>, session: Session, Form(form): Form<CsrfForm>) -> Response {
     if !csrf_ok(&app.secret, &session.user, &form.csrf) {
@@ -685,6 +770,9 @@ pub struct ProviderForm {
     pub kind: String,
     #[serde(default)]
     pub base: String,
+    /// The CardDAV address-book home, read for `webdav` only.
+    #[serde(default)]
+    pub contacts: String,
     /// `test`, `save` or `clear`.
     #[serde(default)]
     pub action: String,
@@ -731,7 +819,7 @@ pub async fn provider_save(State(app): State<Arc<App>>, session: Session, Form(f
     }
 
     let in_use = app.provider_config().await;
-    let typed = match ProviderConfig::parse(&form.kind, &form.base) {
+    let typed = match ProviderConfig::parse(&form.kind, &form.base).and_then(|config| config.with_contacts(&form.contacts)) {
         Ok(config) => config,
         Err(detail) => {
             let strip = format!("<p class=\"strip bad\">{}</p>", escape(detail));
@@ -966,22 +1054,31 @@ pub fn provider_body(
         .map(|t| t.kind.trim().to_ascii_lowercase())
         .unwrap_or_else(|| in_use.map(|(config, _)| config.kind.clone()).unwrap_or_else(|| crate::settings::KINDS[0].to_owned()));
     let base_now = typed.map(|t| t.base.trim().to_owned()).unwrap_or_else(|| in_use.map(|(config, _)| config.base.clone()).unwrap_or_default());
+    let contacts_now =
+        typed.map(|t| t.contacts.trim().to_owned()).unwrap_or_else(|| in_use.and_then(|(config, _)| config.contacts.clone()).unwrap_or_default());
 
     body.push_str("<h2>Point it somewhere</h2><section class=\"panel\"><form method=\"post\" action=\"/settings/provider\">");
     body.push_str(&hidden_csrf(&token));
     body.push_str("<label for=\"kind\">Kind</label><select id=\"kind\" name=\"kind\">");
     for kind in crate::settings::KINDS {
         let selected = if kind == kind_now { " selected" } else { "" };
-        body.push_str(&format!("<option value=\"{kind}\"{selected}>{}</option>", escape(&capitalise(kind))));
+        body.push_str(&format!("<option value=\"{kind}\"{selected}>{}</option>", escape(&crate::settings::kind_label(kind))));
     }
     body.push_str("</select>");
     body.push_str(&format!(
         "<label for=\"base\">Address</label>\
          <input id=\"base\" name=\"base\" type=\"url\" inputmode=\"url\" autocomplete=\"off\" spellcheck=\"false\" \
          placeholder=\"https://cloud.example.com\" value=\"{}\">\
-         <p class=\"hint\">The server root, with no path and no query. \
-         A test asks the provider to begin a sign-in. That proves it answers before anybody depends on it.</p>",
-        escape(&base_now)
+         <p class=\"hint\">For Nextcloud and ownCloud, the server root, with no path and no query. \
+         For WebDAV, the files address itself. Write <code>{{user}}</code> where the server puts the login name, \
+         as in <code>https://dav.example.com/files/{{user}}</code>. \
+         A test asks the server to answer before anybody depends on it.</p>\
+         <label for=\"contacts\">Address books (WebDAV only, optional)</label>\
+         <input id=\"contacts\" name=\"contacts\" type=\"url\" inputmode=\"url\" autocomplete=\"off\" spellcheck=\"false\" \
+         placeholder=\"https://dav.example.com/addressbooks/{{user}}\" value=\"{}\">\
+         <p class=\"hint\">A CardDAV address-book home, for the contact picker. Leave it empty where the server has none.</p>",
+        escape(&base_now),
+        escape(&contacts_now)
     ));
     body.push_str(
         "<div class=\"row\"><button class=\"btn quiet\" type=\"submit\" name=\"action\" value=\"test\">Test</button>\

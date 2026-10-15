@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/nextcloud", "crates/collab", "crates/cloud-client", "crates/share-backend"]
+members = [".", "crates/nextcloud", "crates/webdav", "crates/collab", "crates/cloud-client", "crates/share-backend"]
 
 # What the moved crates inherit. They were written against a workspace root
 # and they keep working against this one.
@@ -32,6 +32,7 @@ craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "289d562cc6e
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
+craft-webdav = { path = "crates/webdav" }
 collabcraft-share = { path = "crates/share-backend" }
 # The browser bindings, pinned here so the client, the share adapter and
 # the browser hub cannot end up on three different versions of them.
@@ -69,6 +70,7 @@ todo = "warn"
 axum = "0.8"
 craft-cloud = { workspace = true }
 craft-nextcloud = { workspace = true }
+craft-webdav = { workspace = true }
 # The identity provider and the cloud provider are both reached over HTTP. The
 # blocking client is for the provider contracts, which are synchronous and run
 # on a blocking thread.

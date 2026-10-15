@@ -1,0 +1,18 @@
+[package]
+name = "craft-webdav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Any WebDAV server for the Craft apps: files over RFC 4918 and, where the server has them, contacts over CardDAV"
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-cloud = { workspace = true }
+# The WebDAV and CardDAV plumbing, which is RFC work and names no vendor once
+# the roots are supplied. Reused rather than written twice.
+craft-nextcloud = { workspace = true }
+log = { workspace = true }

@@ -19,16 +19,49 @@ use crate::mail::{Mail, MailAccount, NewMessage};
 use crate::share::{NewShare, Permissions, ShareKind};
 use crate::{Account, Contacts, Error, Files, Shares, send};
 
-/// A Nextcloud account, with a transport, offered through the generic
-/// contracts.
+/// Which of the two servers sharing this protocol family is on the other end.
+///
+/// ownCloud Server is where Nextcloud forked from. Files, CardDAV, the OCS
+/// Share API, the sharee search and `cloud/user` answer the same way on both.
+/// What ownCloud lacks is everything Nextcloud added afterwards: Talk, the Mail
+/// app and administrator notifications. The flavour decides only that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flavor {
+    Nextcloud,
+    OwnCloud,
+}
+
+/// A Nextcloud (or ownCloud) account, with a transport, offered through the
+/// generic contracts.
 pub struct Nextcloud<H: Http> {
     account: Account,
     http: H,
+    flavor: Flavor,
 }
 
 impl<H: Http> Nextcloud<H> {
     pub fn new(account: Account, http: H) -> Nextcloud<H> {
-        Nextcloud { account, http }
+        Nextcloud { account, http, flavor: Flavor::Nextcloud }
+    }
+
+    /// An ownCloud Server account. See [`Flavor`] for what differs.
+    pub fn owncloud(account: Account, http: H) -> Nextcloud<H> {
+        Nextcloud { account, http, flavor: Flavor::OwnCloud }
+    }
+
+    pub fn flavor(&self) -> Flavor {
+        self.flavor
+    }
+
+    /// Where a user's avatar is drawn.
+    ///
+    /// Through `index.php`, because ownCloud only routes it that way and
+    /// Nextcloud answers both forms.
+    fn avatar(&self, user: &str) -> String {
+        match self.flavor {
+            Flavor::Nextcloud => format!("{}/avatar/{}/64", self.account.base(), user),
+            Flavor::OwnCloud => format!("{}/index.php/avatar/{}/64", self.account.base(), crate::encode_segment(user)),
+        }
     }
 
     pub fn account(&self) -> &Account {
@@ -316,7 +349,7 @@ impl<H: Http> craft_cloud::Contacts for Nextcloud<H> {
                 target,
                 name: if c.name.is_empty() { c.user_id.clone() } else { c.name.clone() },
                 email: c.emails.first().cloned(),
-                avatar: (!c.user_id.is_empty()).then(|| format!("{}/avatar/{}/64", self.account.base(), c.user_id)),
+                avatar: (!c.user_id.is_empty()).then(|| self.avatar(&c.user_id)),
                 is_group: false,
             });
         }
@@ -404,6 +437,10 @@ fn collect_sharees(rows: &serde_json::Value, out: &mut Vec<CloudContact>, limit:
 
 impl<H: Http> craft_cloud::Notifications for Nextcloud<H> {
     fn notify(&self, user: &str, notification: &Notification) -> CloudResult<()> {
+        if self.flavor == Flavor::OwnCloud {
+            // ownCloud's notifications app takes no notification from a client.
+            return Err(CloudError::Unsupported("notifications"));
+        }
         // Nextcloud only lets an administrator raise a notification for
         // another account. A share already raises one by itself, so this is
         // for everything else and will refuse for an ordinary account.
@@ -432,6 +469,10 @@ impl<H: Http> craft_cloud::Notifications for Nextcloud<H> {
 /// sees a person they can reply to.
 impl<H: Http> craft_cloud::Mail for Nextcloud<H> {
     fn send(&self, message: &MailMessage) -> CloudResult<()> {
+        if self.flavor == Flavor::OwnCloud {
+            // There is no Mail app for ownCloud with an API to send through.
+            return Err(CloudError::Unsupported("mail"));
+        }
         let mail = Mail::new(&self.account);
         let accounts = mail.accounts(&self.http).map_err(lift)?;
         // The first account that can send, in the server's own order. That is
@@ -458,7 +499,7 @@ impl<H: Http> craft_cloud::Accounts for Nextcloud<H> {
         Ok(Identity {
             display: data.get("displayname").filter(|v| !v.is_empty()).unwrap_or(&id).to_owned(),
             email: data.get("email").filter(|v| !v.is_empty()).map(str::to_owned),
-            avatar: Some(format!("{}/avatar/{}/64", self.account.base(), id)),
+            avatar: Some(self.avatar(&id)),
             id,
         })
     }
@@ -535,10 +576,13 @@ impl<H: Http> Nextcloud<H> {
 /// same room, and they keep landing there after somebody moves the document.
 impl<H: Http> craft_cloud::Conversations for Nextcloud<H> {
     fn conversation_name(&self) -> Option<String> {
-        Some("Talk".to_owned())
+        (self.flavor == Flavor::Nextcloud).then(|| "Talk".to_owned())
     }
 
     fn conversation(&self, id: &str, _title: &str) -> CloudResult<CloudConversation> {
+        if self.flavor == Flavor::OwnCloud {
+            return Err(CloudError::Unsupported("conversations"));
+        }
         let file_id = craft_cloud::Files::stat(self, id)?.room;
         if file_id.is_empty() || !file_id.chars().all(|c| c.is_ascii_digit()) {
             // Without a file id there is nothing stable to key a room on, and a
@@ -561,24 +605,27 @@ impl<H: Http> craft_cloud::Conversations for Nextcloud<H> {
 
 impl<H: Http> craft_cloud::Provider for Nextcloud<H> {
     fn id(&self) -> &str {
-        "nextcloud"
+        match self.flavor {
+            Flavor::Nextcloud => "nextcloud",
+            Flavor::OwnCloud => "owncloud",
+        }
     }
 
     fn capabilities(&self) -> Vec<Capability> {
         // The constants are the ones every Nextcloud has. Everything about
         // sharing is read from the instance, because an administrator can turn
         // public links or link passwords off and the dialog has to follow.
-        let mut out = vec![
-            Capability::Files,
-            Capability::SharedWithMe,
-            Capability::Sharing,
-            Capability::Contacts,
-            Capability::Notifications,
-            Capability::Etags,
-            // Nextcloud mails a share recipient through its own SMTP. That is
-            // separate from sending arbitrary mail, which is the Mail app.
-            Capability::ShareNotify,
-        ];
+        let mut out = vec![Capability::Files, Capability::SharedWithMe, Capability::Sharing, Capability::Contacts, Capability::Etags];
+        if self.flavor == Flavor::OwnCloud {
+            // Sharing, contacts and files are the whole of it. The share API
+            // takes no sendMail flag there, so a recipient is not mailed by it.
+            out.extend(self.instance_capabilities().into_iter().filter(|c| *c != Capability::Conversation));
+            return out;
+        }
+        out.push(Capability::Notifications);
+        // Nextcloud mails a share recipient through its own SMTP. That is
+        // separate from sending arbitrary mail, which is the Mail app.
+        out.push(Capability::ShareNotify);
         out.extend(self.instance_capabilities());
         // The capabilities endpoint says nothing about the Mail app. This is
         // asked separately. See `can_send_mail`.

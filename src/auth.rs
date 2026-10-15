@@ -162,6 +162,15 @@ pub async fn link_start(State(app): State<Arc<App>>, session: Session) -> Respon
         )
             .into_response();
     };
+    if !config.uses_login_flow() {
+        // Nothing to open in a browser. The client asks for a login name and
+        // an app password and sends them to `link/password`.
+        return (
+            StatusCode::CONFLICT,
+            Json(crate::api::ApiError { code: "password_link", detail: "this provider is linked with a login name and an app password".to_owned() }),
+        )
+            .into_response();
+    }
     let base = config.base;
     let flow = tokio::task::spawn_blocking(move || {
         let http = crate::transport::ReqwestHttp::default();
@@ -227,6 +236,42 @@ pub async fn link_poll(State(app): State<Arc<App>>, session: Session, Json(q): J
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, Json(crate::api::ApiError { code: "provider_unreachable", detail: e.to_string() })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::api::ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+pub struct LinkPassword {
+    pub user: String,
+    pub password: String,
+}
+
+/// Link with a login name and an app password, for a provider with no browser
+/// sign-in of its own.
+///
+/// Checked against the server before anything is stored. A credential the
+/// server refuses answers 401 and is forgotten.
+pub async fn link_password(State(app): State<Arc<App>>, session: Session, Json(q): Json<LinkPassword>) -> Response {
+    let error = |status: StatusCode, code: &'static str, detail: &str| {
+        (status, Json(crate::api::ApiError { code, detail: detail.to_owned() })).into_response()
+    };
+    if session.is_guest() {
+        return error(StatusCode::FORBIDDEN, "forbidden", "a shared link carries no account to link");
+    }
+    let Some((config, _)) = app.provider_config().await else {
+        return error(StatusCode::NOT_IMPLEMENTED, "provider_not_configured", "this deployment has no cloud provider configured");
+    };
+    let user = q.user.trim().to_owned();
+    if user.is_empty() || q.password.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "invalid", "a login name and a password are both needed");
+    }
+    match crate::state::verify_link(&config, &user, &q.password).await {
+        Ok(()) => {}
+        Err(craft_cloud::Error::Unauthenticated) => return error(StatusCode::UNAUTHORIZED, "rejected", "the server did not accept that credential"),
+        Err(e) => return error(StatusCode::BAD_GATEWAY, "provider_unreachable", &e.to_string()),
+    }
+    if !app.store.put_provider_link(&session.user, &ProviderLink { user, password: q.password }).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "store_failed", "the link could not be saved");
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Forget the linked account. The credential is revocable at the provider too,

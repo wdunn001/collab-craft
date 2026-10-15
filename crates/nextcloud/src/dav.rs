@@ -65,7 +65,13 @@ impl<'a> Files<'a> {
 
     /// Absolute URL for a path under the user's files root.
     fn url(&self, path: &str) -> Result<String> {
-        Ok(format!("{}{}", self.account.files_root(), encode_path(path)?))
+        let rest = encode_path(path)?;
+        // The root is a collection. Apache and others redirect a collection
+        // asked for without its slash, and the transport follows no redirect.
+        if rest.is_empty() {
+            return Ok(format!("{}/", self.account.files_root()));
+        }
+        Ok(format!("{}{rest}", self.account.files_root()))
     }
 
     /// List the direct children of a folder.

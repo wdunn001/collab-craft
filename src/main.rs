@@ -243,6 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/device/poll", axum::routing::post(auth::device_poll))
         .route("/link/start", axum::routing::post(auth::link_start))
         .route("/link/poll", axum::routing::post(auth::link_poll))
+        .route("/link/password", axum::routing::post(auth::link_password))
         .route("/link", axum::routing::delete(auth::unlink));
 
     // The web face. Server rendered out of this binary, so the service answers
@@ -255,6 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account", axum::routing::get(pages::account))
         .route("/account/link", axum::routing::post(pages::link_begin))
         .route("/account/link/finish", axum::routing::post(pages::link_finish))
+        .route("/account/link/password", axum::routing::post(pages::link_password))
         .route("/account/unlink", axum::routing::post(pages::unlink))
         .route("/account/signout", axum::routing::post(pages::signout))
         .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save))

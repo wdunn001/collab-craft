@@ -872,7 +872,7 @@ mod web {
     }
 
     fn form(csrf: &str, kind: &str, base: &str, action: &str) -> ProviderForm {
-        ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), action: action.to_owned() }
+        ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), contacts: String::new(), action: action.to_owned() }
     }
 
     // ---- entitlement a deployment can change without a redeploy -------------
@@ -1061,7 +1061,7 @@ mod web {
     #[test]
     fn a_stored_provider_overrides_the_environment() {
         let settings = env_provider("https://env.example.com");
-        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned(), contacts: None };
         let (config, source) = settings.resolve(Some(stored)).expect("a provider");
         assert_eq!(config.base, "https://stored.example.com");
         assert_eq!(source, Source::Stored);
@@ -1084,7 +1084,7 @@ mod web {
         // provider.
         let settings = env_provider("https://env.example.com");
         for empty in ["", "   "] {
-            let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: empty.to_owned() };
+            let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: empty.to_owned(), contacts: None };
             let (config, source) = settings.resolve(Some(stored)).expect("the environment still answers");
             assert_eq!(config.base, "https://env.example.com");
             assert_eq!(source, Source::Environment);
@@ -1102,7 +1102,7 @@ mod web {
     fn the_environment_default_is_still_reported_once_something_is_stored() {
         // The setup page says which of the two is in use. That needs both.
         let settings = env_provider("https://env.example.com");
-        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned(), contacts: None };
         assert_eq!(settings.resolve(Some(stored)).map(|(c, _)| c.base), Some("https://stored.example.com".to_owned()));
         assert_eq!(settings.env_default().map(|c| c.base.clone()), Some("https://env.example.com".to_owned()));
     }
@@ -1140,7 +1140,7 @@ mod web {
     fn a_kind_this_binary_does_not_implement_is_refused() {
         // Offered nowhere in the form either. Storing one would leave a
         // deployment pointed at something nothing here can speak to.
-        for bad in ["", "owncloud", "seafile", "nextcloud-ng"] {
+        for bad in ["", "dropbox", "seafile", "nextcloud-ng"] {
             assert!(ProviderConfig::parse(bad, "https://cloud.example.com").is_err(), "{bad:?} must be refused");
         }
         assert!(ProviderConfig::parse("nextcloud", "https://cloud.example.com").is_ok());
@@ -1193,7 +1193,7 @@ mod web {
     #[test]
     fn the_setup_page_names_the_address_because_that_group_may_change_it() {
         let app = service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]);
-        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned(), contacts: None };
         let in_use = (stored, Source::Stored);
         let body = pages::provider_body(&app, &signed_in(&["craft-admins"]), Some(&in_use), None, None);
         assert!(body.contains("https://stored.example.com"), "the address in use is the point of the page");
@@ -1308,5 +1308,61 @@ mod web {
         let submitted = form(&pages::csrf(SECRET, "sub-1"), "nextcloud", "cloud.example.com", "save");
         let refused = pages::provider_save(State(app), signed_in(&["craft-admins"]), Form(submitted)).await;
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "a malformed address is refused before anything is dialled");
+    }
+}
+
+mod provider_kinds {
+    use crate::settings::{KINDS, ProviderConfig, kind_label};
+
+    #[test]
+    fn every_kind_the_binary_offers_is_accepted_and_builds_a_provider() {
+        for kind in KINDS {
+            let config = ProviderConfig::parse(kind, "https://cloud.example.com").expect("accepted");
+            let provider = crate::state::provider_from(&config, "alice", "pw").expect("built");
+            assert_eq!(provider.id(), kind, "the provider reports the kind it was configured as");
+        }
+        let unknown = ProviderConfig { kind: "dropbox".to_owned(), base: "https://x".to_owned(), contacts: None };
+        assert!(crate::state::provider_from(&unknown, "alice", "pw").is_none());
+    }
+
+    #[test]
+    fn only_nextcloud_links_through_a_browser_sign_in() {
+        let link = |kind| ProviderConfig::parse(kind, "https://cloud.example.com").expect("accepted").uses_login_flow();
+        assert!(link("nextcloud"));
+        assert!(!link("owncloud"));
+        assert!(!link("webdav"));
+    }
+
+    #[test]
+    fn a_webdav_address_may_carry_a_path_and_a_user_placeholder() {
+        let config = ProviderConfig::parse("webdav", "https://dav.example.com/files/{user}/").expect("accepted");
+        assert_eq!(config.base, "https://dav.example.com/files/{user}");
+        assert_eq!(config.layout().files_for("alice"), "https://dav.example.com/files/alice");
+    }
+
+    #[test]
+    fn an_address_book_is_kept_for_webdav_and_dropped_elsewhere() {
+        let dav = ProviderConfig::parse("webdav", "https://dav.example.com/files").expect("accepted");
+        let with = dav.clone().with_contacts(" https://dav.example.com/card/{user}/ ").expect("accepted");
+        assert_eq!(with.contacts.as_deref(), Some("https://dav.example.com/card/{user}"));
+        assert!(dav.clone().with_contacts("not an address").is_err());
+        assert_eq!(dav.with_contacts("").expect("empty is none").contacts, None);
+        let nc = ProviderConfig::parse("nextcloud", "https://cloud.example.com").expect("accepted");
+        assert_eq!(nc.with_contacts("https://elsewhere.example.com").expect("ignored").contacts, None);
+    }
+
+    #[test]
+    fn a_record_stored_before_address_books_existed_still_reads() {
+        let old: ProviderConfig = serde_json::from_str(r#"{"kind":"nextcloud","base":"https://cloud.example.com"}"#).expect("read");
+        assert_eq!(old.contacts, None);
+        let written = serde_json::to_string(&old).expect("written");
+        assert!(!written.contains("contacts"), "an absent address book is not written out");
+    }
+
+    #[test]
+    fn kinds_are_named_the_way_their_makers_spell_them() {
+        assert_eq!(kind_label("owncloud"), "ownCloud");
+        assert_eq!(kind_label("webdav"), "WebDAV");
+        assert_eq!(kind_label("nextcloud"), "Nextcloud");
     }
 }

@@ -48,9 +48,9 @@ pub use contacts::{AddressBook, Contact, Contacts};
 pub use dav::{Entry, Files, Lock};
 pub use error::{Error, Result};
 pub use http::{Http, Method, Request, Response};
-pub use login::{AppPassword, LoginFlow, begin, collab_token};
+pub use login::{AppPassword, LoginFlow, ServerStatus, begin, collab_token, status};
 pub use mail::{Mail, MailAccount, NewMessage};
-pub use provider::Nextcloud;
+pub use provider::{Flavor, Nextcloud};
 pub use share::{NewShare, Permissions, Share, ShareKind, Shares};
 
 use std::fmt;
@@ -71,6 +71,10 @@ pub struct Account {
     base: String,
     user: String,
     password: String,
+    /// Where this user's files live, when the server is not laid out the way Nextcloud is.
+    files_root: Option<String>,
+    /// Where this user's address books live, on the same terms.
+    addressbook_root: Option<String>,
 }
 
 impl fmt::Debug for Account {
@@ -87,7 +91,25 @@ impl Account {
         while base.ends_with('/') {
             base.pop();
         }
-        Account { base, user: user.into(), password: password.into() }
+        Account { base, user: user.into(), password: password.into(), files_root: None, addressbook_root: None }
+    }
+
+    /// Put this user's files somewhere other than Nextcloud's own layout.
+    ///
+    /// Every WebDAV server picks its own path. ownCloud and Nextcloud agree, and
+    /// SabreDAV, Apache, Seafile and a NAS each answer somewhere else. `url` is
+    /// absolute and the trailing slash is dropped.
+    #[must_use]
+    pub fn with_files_root(mut self, url: impl Into<String>) -> Account {
+        self.files_root = Some(url.into().trim_end_matches('/').to_owned());
+        self
+    }
+
+    /// Put this user's address books somewhere other than Nextcloud's own layout.
+    #[must_use]
+    pub fn with_addressbook_root(mut self, url: impl Into<String>) -> Account {
+        self.addressbook_root = Some(url.into().trim_end_matches('/').to_owned());
+        self
     }
 
     pub fn base(&self) -> &str {
@@ -109,11 +131,17 @@ impl Account {
 
     /// The WebDAV files root for this user, without a trailing slash.
     pub(crate) fn files_root(&self) -> String {
+        if let Some(root) = &self.files_root {
+            return root.clone();
+        }
         format!("{}/remote.php/dav/files/{}", self.base, encode_segment(&self.user))
     }
 
     /// The CardDAV address-book home for this user.
     pub(crate) fn addressbook_root(&self) -> String {
+        if let Some(root) = &self.addressbook_root {
+            return root.clone();
+        }
         format!("{}/remote.php/dav/addressbooks/users/{}", self.base, encode_segment(&self.user))
     }
 
@@ -148,7 +176,7 @@ impl Account {
 /// a path. Callers that mean to pass several segments split them first, see [`encode_path`].
 ///
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986#section-2.3
-pub(crate) fn encode_segment(segment: &str) -> String {
+pub fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.as_bytes() {
         match byte {

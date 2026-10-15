@@ -123,3 +123,29 @@ pub fn collab_token<H: Http>(http: &H, account: &crate::Account, file_id: u64) -
         .map(str::to_owned)
         .ok_or_else(|| Error::malformed("collab token", "no token in the OCS data"))
 }
+
+/// What a server says about itself on `status.php`.
+///
+/// Nextcloud and ownCloud both answer it, with no credential, since their own
+/// desktop clients ask before anything else. It is the cheapest proof that an
+/// address is one of the two and ready to serve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerStatus {
+    /// `Nextcloud` or `ownCloud`, as the server spells it.
+    pub product: String,
+    pub version: String,
+    pub installed: bool,
+    pub maintenance: bool,
+}
+
+/// Ask a server what it is.
+///
+/// `base` is the server root, such as `https://cloud.example.com`.
+pub fn status<H: Http>(http: &H, base: &str) -> Result<ServerStatus> {
+    let url = format!("{}/status.php", base.trim_end_matches('/'));
+    let resp = crate::send(http, Request::new(Method::Get, url))?;
+    let v: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| Error::malformed("status", e.to_string()))?;
+    let text = |key: &str| v.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let flag = |key: &str| v.get(key).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    Ok(ServerStatus { product: text("productname"), version: text("versionstring"), installed: flag("installed"), maintenance: flag("maintenance") })
+}
