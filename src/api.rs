@@ -716,11 +716,16 @@ pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axu
         let Some(session) = session else {
             // Send them to sign in rather than refusing flatly: an anonymous
             // visitor has not been denied anything yet.
-            return axum::response::Redirect::temporary("/auth/login").into_response();
+            let mut response = axum::response::Redirect::temporary("/auth/login").into_response();
+            apply_cross_origin_isolation(&path, &first, &app, &mut response);
+            return response;
         };
         if !app.entitlements().await.0.may_open(&session, &first) {
-            return (StatusCode::FORBIDDEN, Json(ApiError { code: "app_not_permitted", detail: format!("you do not have access to {first}") }))
-                .into_response();
+            let mut response =
+                (StatusCode::FORBIDDEN, Json(ApiError { code: "app_not_permitted", detail: format!("you do not have access to {first}") }))
+                    .into_response();
+            apply_cross_origin_isolation(&path, &first, &app, &mut response);
+            return response;
         }
     }
 
