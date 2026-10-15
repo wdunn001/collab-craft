@@ -241,6 +241,14 @@ impl Client {
         self.call(req::read(id)).await
     }
 
+    pub async fn read_range(&self, id: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+        self.call(req::read_range(id, offset, length)).await
+    }
+
+    pub async fn stat(&self, id: &str) -> Result<Entry> {
+        self.call(req::stat(id)).await
+    }
+
     /// Save, refusing to overwrite a newer version when `if_match` is given.
     pub async fn write(&self, id: &str, bytes: &[u8], if_match: Option<&str>) -> Result<Entry> {
         self.call(req::write(id, bytes, if_match)).await

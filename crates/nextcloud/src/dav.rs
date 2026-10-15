@@ -45,6 +45,21 @@ pub struct Entry {
     pub file_id: String,
 }
 
+/// Bytes returned from a ranged GET together with optional total size / etag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RangeResult {
+    pub bytes: Vec<u8>,
+    pub total: Option<u64>,
+    pub etag: Option<String>,
+}
+
+fn content_range_total(header: Option<&str>) -> Option<u64> {
+    let value = header?;
+    // `bytes 0-99/1000` or `bytes */1000`
+    let slash = value.rfind('/')?;
+    value[slash + 1..].trim().parse().ok()
+}
+
 /// A held WebDAV lock, as returned by [`Files::lock`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lock {
@@ -120,6 +135,39 @@ impl<'a> Files<'a> {
     pub fn get<H: Http>(&self, http: &H, path: &str) -> Result<Vec<u8>> {
         let req = self.account.request(Method::Get, self.url(path)?);
         Ok(send(http, req)?.body)
+    }
+
+    /// Read a byte range. Accepts `206 Partial Content` or a full `200` (sliced client-side).
+    pub fn get_range<H: Http>(&self, http: &H, path: &str, offset: u64, length: u64) -> Result<RangeResult> {
+        if length == 0 {
+            return Err(Error::Invalid { what: "range", detail: "length must be greater than zero".to_owned() });
+        }
+        let last = offset.saturating_add(length.saturating_sub(1));
+        let req = self.account.request(Method::Get, self.url(path)?).header("range", format!("bytes={offset}-{last}"));
+        let method = req.method;
+        let url = req.url.clone();
+        let resp = http.send(req).map_err(|e| Error::Transport(e.to_string()))?;
+        if resp.body.len() > crate::MAX_BODY {
+            return Err(Error::malformed("response", format!("body of {} bytes exceeds the cap", resp.body.len())));
+        }
+        match resp.status {
+            206 => {
+                let total = content_range_total(resp.get_header("content-range"));
+                let etag = resp.get_header("etag").map(str::to_owned);
+                Ok(RangeResult { bytes: resp.body, total, etag })
+            }
+            s if (200..300).contains(&s) => {
+                let etag = resp.get_header("etag").map(str::to_owned);
+                let full = resp.body;
+                let start = offset.min(full.len() as u64) as usize;
+                let end = offset.saturating_add(length).min(full.len() as u64) as usize;
+                let bytes = if start >= end { Vec::new() } else { full[start..end].to_vec() };
+                let total = Some(full.len() as u64);
+                Ok(RangeResult { bytes, total, etag })
+            }
+            416 => Err(Error::Invalid { what: "range", detail: "range not satisfiable".to_owned() }),
+            _ => Err(Error::status(method, &url, &resp)),
+        }
     }
 
     /// Write a file, creating or replacing it.

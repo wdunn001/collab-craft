@@ -21,8 +21,10 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, ETAG, RANGE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use craft_cloud::{Permission, Provider, ShareTarget};
 use serde::{Deserialize, Serialize};
@@ -175,6 +177,25 @@ pub async fn shared_with_me(State(app): State<Arc<App>>, session: Session) -> Re
 #[derive(Deserialize)]
 pub struct IdQuery {
     pub id: String,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub length: Option<u64>,
+}
+
+fn parse_http_range(value: Option<&HeaderValue>) -> Option<(u64, u64)> {
+    let raw = value?.to_str().ok()?;
+    let spec = raw.strip_prefix("bytes=")?;
+    let (start, end_inclusive) = spec.split_once('-')?;
+    let first: u64 = start.parse().ok()?;
+    if end_inclusive.is_empty() {
+        return None;
+    }
+    let last: u64 = end_inclusive.parse().ok()?;
+    if last < first {
+        return None;
+    }
+    Some((first, last.saturating_sub(first).saturating_add(1)))
 }
 
 /// Where to go to work together on a document.
@@ -191,13 +212,66 @@ pub async fn conversation(State(app): State<Arc<App>>, session: Session, Query(q
     run(move || p.conversation(&q.id, &title)).await
 }
 
-pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
+pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>, headers: HeaderMap) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    match tokio::task::spawn_blocking(move || p.read(&q.id)).await {
-        Ok(Ok(bytes)) => ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
-        Ok(Err(e)) => fail(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
+    let range = parse_http_range(headers.get(RANGE)).or_else(|| match (q.offset, q.length) {
+        (Some(offset), Some(length)) => Some((offset, length)),
+        _ => None,
+    });
+    if let Some((offset, length)) = range {
+        let id = q.id.clone();
+        match tokio::task::spawn_blocking(move || {
+            let entry = p.stat(&id)?;
+            let total = entry.size.unwrap_or(0);
+            if total > 0 && offset >= total {
+                return Err(craft_cloud::Error::Invalid { what: "range", detail: "range not satisfiable".to_owned() });
+            }
+            let bytes = p.read_range(&id, offset, length)?;
+            Ok((bytes, total, entry.etag))
+        })
+        .await
+        {
+            Ok(Ok((bytes, total, etag))) => {
+                let last = offset.saturating_add(bytes.len() as u64).saturating_sub(1);
+                let mut builder = Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(CONTENT_TYPE, "application/octet-stream")
+                    .header(ACCEPT_RANGES, "bytes")
+                    .header(CONTENT_RANGE, format!("bytes {offset}-{last}/{total}"));
+                if let Some(tag) = etag {
+                    if let Ok(v) = HeaderValue::from_str(&tag) {
+                        builder = builder.header(ETAG, v);
+                    }
+                }
+                builder.body(Body::from(bytes)).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            }
+            Ok(Err(craft_cloud::Error::Invalid { what: "range", detail })) => {
+                (StatusCode::RANGE_NOT_SATISFIABLE, Json(ApiError { code: "range_not_satisfiable", detail })).into_response()
+            }
+            Ok(Err(e)) => fail(e),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
+        }
+    } else {
+        let id = q.id;
+        match tokio::task::spawn_blocking(move || p.read(&id)).await {
+            Ok(Ok(bytes)) => (
+                StatusCode::OK,
+                [
+                    (CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
+                    (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Ok(Err(e)) => fail(e),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
+        }
     }
+}
+
+pub async fn file_meta(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
+    let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
+    run(move || p.stat(&q.id)).await
 }
 
 #[derive(Deserialize)]

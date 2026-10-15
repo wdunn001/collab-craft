@@ -225,6 +225,82 @@ fn put_without_an_etag_sends_no_if_match() {
 }
 
 #[test]
+fn get_range_sends_range_header_and_accepts_partial_content() {
+    let a = acct();
+    let http = Fake::new(vec![Response::new(206, b"2345".to_vec()).header("content-range", "bytes 2-5/10")]);
+    let out = Files::new(&a).get_range(&http, "/clip.bin", 2, 4).expect("range get");
+    assert_eq!(out.bytes, b"2345");
+    assert_eq!(out.total, Some(10));
+    let req = http.last();
+    assert_eq!(req.method, Method::Get);
+    assert_eq!(req.get_header("range"), Some("bytes=2-5"));
+}
+
+#[test]
+fn get_range_slices_when_the_server_ignores_range_and_returns_200() {
+    let a = acct();
+    let http = Fake::new(vec![Response::new(200, b"0123456789".to_vec())]);
+    let out = Files::new(&a).get_range(&http, "/clip.bin", 2, 4).expect("range get");
+    assert_eq!(out.bytes, b"2345");
+    assert_eq!(out.total, Some(10));
+}
+
+#[test]
+fn get_range_refuses_a_zero_length() {
+    let a = acct();
+    let http = Fake::one(206, "");
+    let err = Files::new(&a).get_range(&http, "/clip.bin", 0, 0).expect_err("zero length");
+    assert!(matches!(err, crate::Error::Invalid { what: "range", .. }), "{err}");
+    assert!(http.seen.borrow().is_empty(), "nothing should have been sent");
+}
+
+#[test]
+fn get_range_maps_416_to_invalid() {
+    let a = acct();
+    let http = Fake::one(416, "");
+    let err = Files::new(&a).get_range(&http, "/clip.bin", 0, 1).expect_err("416");
+    assert!(matches!(err, crate::Error::Invalid { what: "range", .. }), "{err}");
+}
+
+#[test]
+fn stat_uses_depth_zero_propfind() {
+    let a = acct();
+    let http = Fake::one(207, &one_entry(Some("99")));
+    let entry = Files::new(&a).stat(&http, "/Documents/Plan.docx").expect("stat");
+    assert_eq!(entry.name, "Plan.docx");
+    assert_eq!(entry.path, "/Documents/Plan.docx");
+    assert_eq!(entry.size, 2048);
+    assert_eq!(entry.etag, "abc");
+    assert_eq!(entry.file_id, "99");
+    let req = http.last();
+    assert_eq!(req.method, Method::Propfind);
+    assert_eq!(req.get_header("depth"), Some("0"));
+}
+
+#[test]
+fn provider_read_range_delegates_to_webdav() {
+    use craft_cloud::Files as _;
+
+    let http = Fake::new(vec![Response::new(206, b"xy".to_vec()).header("content-range", "bytes 1-2/4")]);
+    let cloud = crate::Nextcloud::new(acct(), http);
+    let bytes = cloud.read_range("/a.bin", 1, 2).expect("read_range");
+    assert_eq!(bytes, b"xy");
+}
+
+#[test]
+fn provider_stat_returns_entry_without_downloading_bytes() {
+    use craft_cloud::Files as _;
+
+    let http = Fake::one(207, &one_entry(Some("42")));
+    let cloud = crate::Nextcloud::new(acct(), http);
+    let entry = cloud.stat("/Documents/Plan.docx").expect("stat");
+    assert_eq!(entry.id, "/Documents/Plan.docx");
+    assert_eq!(entry.size, Some(2048));
+    assert_eq!(entry.etag.as_deref(), Some("abc"));
+    assert_eq!(http.last().method, Method::Propfind);
+}
+
+#[test]
 fn exists_reads_404_as_an_answer() {
     let a = acct();
     let missing = Fake::new(vec![Response::new(404, Vec::new())]);
