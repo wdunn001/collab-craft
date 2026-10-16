@@ -20,6 +20,7 @@
 //! that cannot be made from one.
 
 use craft_cloud::{Contact, Conversation, Entry, Share};
+use craft_esign::{CompletedDocument, Envelope, EnvelopeDraft};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -305,6 +306,36 @@ impl Client {
     /// Save it back, where the share still allows an edit.
     pub async fn invite_write(&self, bytes: &[u8], if_match: Option<&str>) -> Result<Entry> {
         self.call(req::invite_write(bytes, if_match)).await
+    }
+
+    // ---- e-sign -----------------------------------------------------------
+
+    pub async fn esign_capabilities(&self) -> Result<req::EsignCaps> {
+        self.call(req::esign_capabilities()).await
+    }
+
+    pub async fn esign_create(&self, draft: &EnvelopeDraft, document: &[u8], idempotency_key: &str, send: bool) -> Result<Envelope> {
+        self.call(req::esign_create(draft, document, idempotency_key, send)?).await
+    }
+
+    pub async fn esign_send(&self, id: &str) -> Result<Envelope> {
+        self.call(req::esign_send(id)?).await
+    }
+
+    pub async fn esign_status(&self, id: &str) -> Result<Envelope> {
+        self.call(req::esign_status(id)).await
+    }
+
+    pub async fn esign_completed(&self, id: &str) -> Result<CompletedDocument> {
+        self.call(req::esign_completed(id)).await
+    }
+
+    pub async fn esign_void(&self, id: &str, reason: &str) -> Result<()> {
+        self.call(req::esign_void(id, reason)?).await
+    }
+
+    pub async fn esign_remind(&self, id: &str, recipient: &str) -> Result<()> {
+        self.call(req::esign_remind(id, recipient)?).await
     }
 }
 

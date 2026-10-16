@@ -10,6 +10,7 @@
 //! account to act as.
 
 use craft_cloud::{Contact, Conversation, Entry, Share};
+use craft_esign::{CompletedDocument, Envelope, EnvelopeDraft};
 use serde::Serialize;
 
 use crate::wire::{Call, Method, Request, enc};
@@ -171,6 +172,62 @@ pub fn invite_read() -> Call<Vec<u8>> {
 /// Save it back, where the share still allows an edit.
 pub fn invite_write(bytes: &[u8], if_match: Option<&str>) -> Call<Entry> {
     Call::json(sending(Method::Put, format!("{API}/invite/content{}", first(tag(if_match))), bytes))
+}
+
+// ---- e-sign -----------------------------------------------------------------
+
+#[derive(Debug, Serialize, serde::Deserialize)]
+pub struct EsignCaps {
+    pub capabilities: Vec<craft_esign::EsignCapability>,
+    pub responsible_party: String,
+    pub linked: bool,
+    pub provider: String,
+}
+
+#[derive(Serialize)]
+pub struct EsignCreate<'a> {
+    pub draft: &'a EnvelopeDraft,
+    pub document: &'a [u8],
+    pub idempotency_key: &'a str,
+    pub send: bool,
+}
+
+pub fn esign_capabilities() -> Call<EsignCaps> {
+    Call::json(get(format!("{API}/esign/capabilities")))
+}
+
+pub fn esign_create(draft: &EnvelopeDraft, document: &[u8], idempotency_key: &str, send: bool) -> Result<Call<Envelope>> {
+    Ok(Call::json(posting(
+        format!("{API}/esign/envelopes"),
+        &EsignCreate { draft, document, idempotency_key, send },
+    )?))
+}
+
+pub fn esign_send(id: &str) -> Result<Call<Envelope>> {
+    Ok(Call::json(posting(format!("{API}/esign/envelopes/{}/send", enc(id)), &())?))
+}
+
+pub fn esign_status(id: &str) -> Call<Envelope> {
+    Call::json(get(format!("{API}/esign/envelopes/{}", enc(id))))
+}
+
+pub fn esign_completed(id: &str) -> Call<CompletedDocument> {
+    Call::json(get(format!("{API}/esign/envelopes/{}/completed", enc(id))))
+}
+
+pub fn esign_void(id: &str, reason: &str) -> Result<Call<()>> {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        reason: &'a str,
+    }
+    Ok(Call::nothing(posting(format!("{API}/esign/envelopes/{}/void", enc(id)), &Body { reason })?))
+}
+
+pub fn esign_remind(id: &str, recipient: &str) -> Result<Call<()>> {
+    Ok(Call::nothing(posting(
+        format!("{API}/esign/envelopes/{}/remind/{}", enc(id), enc(recipient)),
+        &(),
+    )?))
 }
 
 /// `&if_match=…`, or nothing at all.

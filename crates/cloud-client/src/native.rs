@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use craft_cloud::{Contact, Conversation, Entry, Share};
+use craft_esign::{CompletedDocument, Envelope, EnvelopeDraft};
 
 use crate::wire::{Call, Method, Request, Response, Target, pending};
 use crate::{DeviceStart, Error, InviteJoin, Join, LinkStart, Me, Result, ShareOutcome, ShareRequest, req};
@@ -251,5 +252,35 @@ impl Client {
     /// Save it back, where the share still allows an edit.
     pub fn invite_write(&self, bytes: &[u8], if_match: Option<&str>) -> Result<Entry> {
         self.call(req::invite_write(bytes, if_match))
+    }
+
+    // ---- e-sign -----------------------------------------------------------
+
+    pub fn esign_capabilities(&self) -> Result<req::EsignCaps> {
+        self.call(req::esign_capabilities())
+    }
+
+    pub fn esign_create(&self, draft: &EnvelopeDraft, document: &[u8], idempotency_key: &str, send: bool) -> Result<Envelope> {
+        self.call(req::esign_create(draft, document, idempotency_key, send)?)
+    }
+
+    pub fn esign_send(&self, id: &str) -> Result<Envelope> {
+        self.call(req::esign_send(id)?)
+    }
+
+    pub fn esign_status(&self, id: &str) -> Result<Envelope> {
+        self.call(req::esign_status(id))
+    }
+
+    pub fn esign_completed(&self, id: &str) -> Result<CompletedDocument> {
+        self.call(req::esign_completed(id))
+    }
+
+    pub fn esign_void(&self, id: &str, reason: &str) -> Result<()> {
+        self.call(req::esign_void(id, reason)?)
+    }
+
+    pub fn esign_remind(&self, id: &str, recipient: &str) -> Result<()> {
+        self.call(req::esign_remind(id, recipient)?)
     }
 }
