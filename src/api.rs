@@ -214,7 +214,7 @@ pub async fn conversation(State(app): State<Arc<App>>, session: Session, Query(q
 
 pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>, headers: HeaderMap) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    let range = parse_http_range(headers.get(RANGE)).or_else(|| match (q.offset, q.length) {
+    let range = parse_http_range(headers.get(RANGE)).or(match (q.offset, q.length) {
         (Some(offset), Some(length)) => Some((offset, length)),
         _ => None,
     });
@@ -238,10 +238,10 @@ pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query
                     .header(CONTENT_TYPE, "application/octet-stream")
                     .header(ACCEPT_RANGES, "bytes")
                     .header(CONTENT_RANGE, format!("bytes {offset}-{last}/{total}"));
-                if let Some(tag) = etag {
-                    if let Ok(v) = HeaderValue::from_str(&tag) {
-                        builder = builder.header(ETAG, v);
-                    }
+                if let Some(tag) = etag
+                    && let Ok(v) = HeaderValue::from_str(&tag)
+                {
+                    builder = builder.header(ETAG, v);
                 }
                 builder.body(Body::from(bytes)).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             }

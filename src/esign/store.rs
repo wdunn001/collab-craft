@@ -160,13 +160,13 @@ impl EsignStore {
     }
 
     pub async fn completed(&self, owner: &str, id: &str) -> craft_esign::Result<CompletedDocument> {
-        let row: Option<(serde_json::Value, Option<Vec<u8>>, Option<Vec<u8>>)> =
-            sqlx::query_as("SELECT envelope_json, completed, evidence FROM esign_envelopes WHERE owner = $1 AND id = $2")
-                .bind(owner)
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db)?;
+        type CompletedRow = (serde_json::Value, Option<Vec<u8>>, Option<Vec<u8>>);
+        let row: Option<CompletedRow> = sqlx::query_as("SELECT envelope_json, completed, evidence FROM esign_envelopes WHERE owner = $1 AND id = $2")
+            .bind(owner)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
         let Some((json, completed, evidence)) = row else {
             return Err(craft_esign::Error::invalid("envelope", "not found"));
         };
@@ -213,7 +213,8 @@ impl EsignStore {
 
     pub async fn redeem_signer_link(&self, wire: &str) -> craft_esign::Result<Option<SignerLinkInfo>> {
         let key = Key::parse(wire).map_err(|_| craft_esign::Error::invalid("link", "bad shape"))?;
-        let row: Option<(String, String, String, String, String, i64, i32, i32)> = sqlx::query_as(
+        type SignerRow = (String, String, String, String, String, i64, i32, i32);
+        let row: Option<SignerRow> = sqlx::query_as(
             "SELECT verifier, owner, envelope_id, recipient_id, email, exp, spent, max_uses FROM esign_signer_links WHERE handle = $1",
         )
         .bind(&key.handle)

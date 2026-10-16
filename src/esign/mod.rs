@@ -117,17 +117,18 @@ fn esign_fail(e: craft_esign::Error) -> Response {
     }
 }
 
-fn runtime(app: &App) -> Result<&EsignRuntime, Response> {
-    app.esign.as_ref().ok_or_else(|| {
-        (StatusCode::NOT_IMPLEMENTED, Json(ApiError { code: "unsupported", detail: "e-sign is not configured on this deployment".into() }))
-            .into_response()
-    })
+fn runtime(app: &App) -> Option<&EsignRuntime> {
+    app.esign.as_ref()
+}
+
+fn esign_unconfigured() -> Response {
+    (StatusCode::NOT_IMPLEMENTED, Json(ApiError { code: "unsupported", detail: "e-sign is not configured on this deployment".into() }))
+        .into_response()
 }
 
 pub async fn capabilities(State(app): State<Arc<App>>, session: Session) -> Response {
-    let Ok(rt) = runtime(&app) else {
-        return (StatusCode::NOT_IMPLEMENTED, Json(ApiError { code: "unsupported", detail: "e-sign is not configured on this deployment".into() }))
-            .into_response();
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     let linked = app.provider_for(&session).await.is_some();
     Json(CapsBody {
@@ -152,9 +153,8 @@ pub struct CreateBody {
 }
 
 pub async fn create(State(app): State<Arc<App>>, session: Session, Json(body): Json<CreateBody>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     if session.is_guest() {
         return (StatusCode::FORBIDDEN, Json(ApiError { code: "forbidden", detail: "guests cannot create envelopes".into() })).into_response();
@@ -201,9 +201,8 @@ pub(crate) async fn stub_create(rt: &EsignRuntime, session: &Session, body: Crea
 }
 
 pub async fn send(State(app): State<Arc<App>>, session: Session, Path(id): Path<String>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     match rt.kind {
         ProviderKind::Stub => match stub_send(rt, &session.user, &id).await {
@@ -232,9 +231,8 @@ async fn stub_send(rt: &EsignRuntime, owner: &str, id: &str) -> craft_esign::Res
 }
 
 pub async fn status(State(app): State<Arc<App>>, session: Session, Path(id): Path<String>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     match rt.store.get(&session.user, &id).await {
         Ok(Some(env)) => Json(env).into_response(),
@@ -244,9 +242,8 @@ pub async fn status(State(app): State<Arc<App>>, session: Session, Path(id): Pat
 }
 
 pub async fn completed(State(app): State<Arc<App>>, session: Session, Path(id): Path<String>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     match rt.store.completed(&session.user, &id).await {
         Ok(doc) => Json(doc).into_response(),
@@ -260,9 +257,8 @@ pub struct VoidBody {
 }
 
 pub async fn void(State(app): State<Arc<App>>, session: Session, Path(id): Path<String>, Json(body): Json<VoidBody>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     match stub_void(rt, &session.user, &id, &body.reason).await {
         Ok(()) => Json(serde_json::json!({ "envelope": id })).into_response(),
@@ -282,9 +278,8 @@ async fn stub_void(rt: &EsignRuntime, owner: &str, id: &str, reason: &str) -> cr
 }
 
 pub async fn remind(State(app): State<Arc<App>>, session: Session, Path((id, recipient)): Path<(String, String)>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     let env = match rt.store.get(&session.user, &id).await {
         Ok(Some(e)) => e,
@@ -305,9 +300,8 @@ pub async fn remind(State(app): State<Arc<App>>, session: Session, Path((id, rec
 /// Stub-only: mark one recipient signed. When every required recipient has
 /// signed, seal the envelope with the original document bytes.
 pub async fn stub_sign(State(app): State<Arc<App>>, session: Session, Path((id, recipient)): Path<(String, String)>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     if rt.kind != ProviderKind::Stub {
         return (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "stub sign is only on the stub provider".into() }))
@@ -343,9 +337,8 @@ async fn stub_mark_signed(rt: &EsignRuntime, owner: &str, id: &str, recipient: &
 
 /// Documenso (or stub test) webhook intake.
 pub async fn webhook(State(app): State<Arc<App>>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     let hdrs: Vec<(String, String)> = headers.iter().filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned()))).collect();
     match rt.kind {
@@ -370,9 +363,8 @@ pub async fn webhook(State(app): State<Arc<App>>, headers: HeaderMap, body: axum
 
 /// Landing page for an esign_signer keyed link (parallel to document invite).
 pub async fn land_signer(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
-    let rt = match runtime(&app) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some(rt) = runtime(&app) else {
+        return esign_unconfigured();
     };
     match rt.store.redeem_signer_link(&key).await {
         Ok(Some(info)) => Json(serde_json::json!({
