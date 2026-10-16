@@ -287,6 +287,7 @@ mod keyed_links {
             web: tower_http::services::ServeDir::new("."),
             hosted: vec!["gridcraft".to_owned(), "wordcraft".to_owned()],
             keyed,
+            esign: None,
         }
     }
 
@@ -819,6 +820,7 @@ mod web {
             web: tower_http::services::ServeDir::new("."),
             hosted: hosted.iter().map(|a| (*a).to_owned()).collect(),
             keyed: Policy::decide(None, "https://craft.example.com", None, None),
+            esign: None,
         }
     }
 

@@ -27,8 +27,9 @@ todo = "warn"
 # craft-ui speaks the craft-cloud vocabulary, so two revisions put two
 # `Permission` types in one binary and nothing can be passed between them.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "6f0a6d2" }
-craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "6f0a6d2" }
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "8823c22" }
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "8823c22" }
+craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "8823c22" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
@@ -69,8 +70,10 @@ todo = "warn"
 [dependencies]
 axum = "0.8"
 craft-cloud = { workspace = true }
+craft-esign = { workspace = true }
 craft-nextcloud = { workspace = true }
 craft-webdav = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 # The identity provider and the cloud provider are both reached over HTTP. The
 # blocking client is for the provider contracts, which are synchronous and run
 # on a blocking thread.

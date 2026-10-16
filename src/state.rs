@@ -160,6 +160,8 @@ pub struct App {
     pub hosted: Vec<String>,
     /// Whether this deployment mints keyed links, and on what terms.
     pub keyed: crate::keyed::Policy,
+    /// Durable e-sign envelopes. Absent when `COLLABCRAFT_ESIGN_DATABASE_URL` is unset.
+    pub esign: Option<crate::esign::EsignRuntime>,
 }
 
 impl App {

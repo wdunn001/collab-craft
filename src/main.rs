@@ -31,6 +31,7 @@
 mod api;
 mod auth;
 mod bus;
+mod esign;
 mod keyed;
 mod pages;
 mod recipient;
@@ -178,6 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !web_root.is_empty() {
         tracing::info!(count = hosted.len(), "browser builds hosted");
     }
+    let esign = esign::EsignRuntime::from_env(&secret_bytes).await?;
     let app_state = Arc::new(state::App {
         // Precompressed on disk, sent with the Content-Encoding header.
         // Brotli at a high level costs minutes per wasm bundle, which is
@@ -192,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store,
         oidc,
         http,
+        esign,
     });
     // What the deployment is actually on, which is the stored value where
     // there is one. Logged at startup because a deployment reading its own log
@@ -234,7 +237,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // above, because those act as the signed-in user against the provider
         // and a recipient is not one.
         .route("/invite/token", axum::routing::get(recipient::token))
-        .route("/invite/content", axum::routing::get(recipient::read).put(recipient::write));
+        .route("/invite/content", axum::routing::get(recipient::read).put(recipient::write))
+        .nest("/esign", esign::router());
 
     let auth_routes = axum::Router::new()
         .route("/login", axum::routing::get(auth::login))
@@ -274,6 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Where a keyed link lands. A real route, so it wins over the static
         // fallback below.
         .route("/invite/{key}", axum::routing::get(recipient::land))
+        .route("/esign/invite/{key}", axum::routing::get(esign::land_signer))
         .fallback(api::web)
         .with_state(app_state);
 

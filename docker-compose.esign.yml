@@ -1,0 +1,71 @@
+# Layer on top of docker-compose.yml for e-sign Postgres (+ optional Documenso).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.esign.yml up -d
+#
+# Set COLLABCRAFT_ESIGN_DATABASE_URL in .env to:
+#   postgres://collabcraft:collabcraft@esign-db:5432/esign
+services:
+  esign-db:
+    image: postgres:16-alpine
+    container_name: collabcraft-esign-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: collabcraft
+      POSTGRES_PASSWORD: collabcraft
+      POSTGRES_DB: esign
+    volumes:
+      - esign-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collabcraft -d esign"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collabcraft:
+    environment:
+      COLLABCRAFT_ESIGN_DATABASE_URL: ${COLLABCRAFT_ESIGN_DATABASE_URL:-postgres://collabcraft:collabcraft@esign-db:5432/esign}
+      COLLABCRAFT_ESIGN_PROVIDER: ${COLLABCRAFT_ESIGN_PROVIDER:-stub}
+      COLLABCRAFT_DOCUMENSO_URL: ${COLLABCRAFT_DOCUMENSO_URL:-}
+      COLLABCRAFT_DOCUMENSO_API_TOKEN: ${COLLABCRAFT_DOCUMENSO_API_TOKEN:-}
+      COLLABCRAFT_DOCUMENSO_WEBHOOK_SECRET: ${COLLABCRAFT_DOCUMENSO_WEBHOOK_SECRET:-}
+    depends_on:
+      esign-db:
+        condition: service_healthy
+
+  # Optional. Profile so stub-only deployments do not pull AGPL images.
+  documenso:
+    profiles: ["documenso"]
+    image: ${DOCUMENSO_IMAGE:-documenso/documenso:latest}
+    container_name: collabcraft-documenso
+    restart: unless-stopped
+    environment:
+      NEXT_PRIVATE_INTERNAL_WEBAPP_URL: ${COLLABCRAFT_DOCUMENSO_URL:-http://documenso:3000}
+      NEXT_PUBLIC_WEBAPP_URL: ${COLLABCRAFT_DOCUMENSO_PUBLIC_URL:-http://localhost:3002}
+      NEXT_PRIVATE_DATABASE_URL: ${DOCUMENSO_DATABASE_URL:-postgres://documenso:documenso@documenso-db:5432/documenso}
+      NEXTAUTH_SECRET: ${DOCUMENSO_NEXTAUTH_SECRET:-change-me-documenso-auth}
+    ports:
+      - "${DOCUMENSO_LISTEN:-127.0.0.1:3002}:3000"
+    depends_on:
+      documenso-db:
+        condition: service_healthy
+
+  documenso-db:
+    profiles: ["documenso"]
+    image: postgres:16-alpine
+    container_name: collabcraft-documenso-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: documenso
+      POSTGRES_PASSWORD: documenso
+      POSTGRES_DB: documenso
+    volumes:
+      - documenso-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U documenso -d documenso"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  esign-pg:
+  documenso-pg:
