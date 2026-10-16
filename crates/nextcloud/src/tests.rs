@@ -673,6 +673,24 @@ fn a_conversation_is_asked_for_by_file_id_so_a_rename_keeps_the_room() {
 }
 
 #[test]
+fn a_file_with_no_room_yet_gets_one_created() {
+    use craft_cloud::Conversations as _;
+
+    let http = std::rc::Rc::new(Fake::new(vec![
+        Response::new(207, one_entry(Some("12345")).into_bytes()),
+        Response::new(404, b"{}".to_vec()),
+        Response::new(200, br#"{"ocs":{"data":{"token":"made"}}}"#.to_vec()),
+    ]));
+    let cloud = crate::Nextcloud::new(acct(), std::rc::Rc::clone(&http));
+    let found = cloud.conversation("/Documents/Plan.docx", "Plan").expect("a room");
+
+    assert_eq!(found.url, "https://cloud.example.net/call/made");
+    let created = http.last();
+    assert_eq!(created.method, Method::Post, "a missing room is created, not only looked up");
+    assert!(created.url.ends_with("/ocs/v2.php/apps/spreed/api/v1/file/12345"), "asked {}", created.url);
+}
+
+#[test]
 fn an_entry_with_no_file_id_has_nowhere_stable_to_key_a_room() {
     use craft_cloud::Conversations as _;
 

@@ -595,8 +595,14 @@ impl<H: Http> craft_cloud::Conversations for Nextcloud<H> {
         }
         let base = self.account.base().trim_end_matches('/').to_owned();
         let url = format!("{base}/ocs/v2.php/apps/spreed/api/v1/file/{file_id}");
-        let req = self.account.request(Method::Get, url).header("accept", "application/json");
-        let resp = send(&self.http, req).map_err(lift)?;
+        // GET returns the room when the file already has one. A file that has
+        // never been talked about answers 404, and POST on the same path
+        // creates the room (or returns the one a race just created).
+        let existing = send(&self.http, self.account.request(Method::Get, url.clone()).header("accept", "application/json"));
+        let resp = match existing {
+            Ok(resp) => resp,
+            Err(_) => send(&self.http, self.account.request(Method::Post, url).header("accept", "application/json")).map_err(lift)?,
+        };
         let body = serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|e| CloudError::malformed("talk conversation", e.to_string()))?;
         let token = body
             .pointer("/ocs/data/token")
