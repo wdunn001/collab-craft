@@ -34,12 +34,7 @@ pub enum ProviderKind {
 
 impl ProviderKind {
     pub fn from_env() -> ProviderKind {
-        match std::env::var("COLLABCRAFT_ESIGN_PROVIDER")
-            .unwrap_or_else(|_| "stub".into())
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        match std::env::var("COLLABCRAFT_ESIGN_PROVIDER").unwrap_or_else(|_| "stub".into()).trim().to_ascii_lowercase().as_str() {
             "documenso" => ProviderKind::Documenso,
             _ => ProviderKind::Stub,
         }
@@ -75,12 +70,7 @@ impl EsignRuntime {
 
     fn capabilities(&self) -> Vec<EsignCapability> {
         match self.kind {
-            ProviderKind::Stub => vec![
-                EsignCapability::Envelopes,
-                EsignCapability::Void,
-                EsignCapability::Reminders,
-                EsignCapability::Webhooks,
-            ],
+            ProviderKind::Stub => vec![EsignCapability::Envelopes, EsignCapability::Void, EsignCapability::Reminders, EsignCapability::Webhooks],
             ProviderKind::Documenso => vec![
                 EsignCapability::Envelopes,
                 EsignCapability::Void,
@@ -129,26 +119,14 @@ fn esign_fail(e: craft_esign::Error) -> Response {
 
 fn runtime(app: &App) -> Result<&EsignRuntime, Response> {
     app.esign.as_ref().ok_or_else(|| {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(ApiError {
-                code: "unsupported",
-                detail: "e-sign is not configured on this deployment".into(),
-            }),
-        )
+        (StatusCode::NOT_IMPLEMENTED, Json(ApiError { code: "unsupported", detail: "e-sign is not configured on this deployment".into() }))
             .into_response()
     })
 }
 
 pub async fn capabilities(State(app): State<Arc<App>>, session: Session) -> Response {
     let Ok(rt) = runtime(&app) else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(ApiError {
-                code: "unsupported",
-                detail: "e-sign is not configured on this deployment".into(),
-            }),
-        )
+        return (StatusCode::NOT_IMPLEMENTED, Json(ApiError { code: "unsupported", detail: "e-sign is not configured on this deployment".into() }))
             .into_response();
     };
     let linked = app.provider_for(&session).await.is_some();
@@ -179,11 +157,7 @@ pub async fn create(State(app): State<Arc<App>>, session: Session, Json(body): J
         Err(r) => return r,
     };
     if session.is_guest() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ApiError { code: "forbidden", detail: "guests cannot create envelopes".into() }),
-        )
-            .into_response();
+        return (StatusCode::FORBIDDEN, Json(ApiError { code: "forbidden", detail: "guests cannot create envelopes".into() })).into_response();
     }
     match rt.kind {
         ProviderKind::Stub => match stub_create(rt, &session, body).await {
@@ -264,11 +238,7 @@ pub async fn status(State(app): State<Arc<App>>, session: Session, Path(id): Pat
     };
     match rt.store.get(&session.user, &id).await {
         Ok(Some(env)) => Json(env).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError { code: "not_found", detail: "envelope not found".into() }),
-        )
-            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "envelope not found".into() })).into_response(),
         Err(e) => esign_fail(e),
     }
 }
@@ -319,20 +289,12 @@ pub async fn remind(State(app): State<Arc<App>>, session: Session, Path((id, rec
     let env = match rt.store.get(&session.user, &id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiError { code: "not_found", detail: "envelope not found".into() }),
-            )
-                .into_response();
+            return (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "envelope not found".into() })).into_response();
         }
         Err(e) => return esign_fail(e),
     };
     if !env.recipients.iter().any(|r| r.id == recipient) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ApiError { code: "not_found", detail: "recipient not found".into() }),
-        )
-            .into_response();
+        return (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "recipient not found".into() })).into_response();
     }
     if let Err(e) = rt.store.append_event(&id, "reminded", Some(&recipient), None).await {
         return esign_fail(e);
@@ -348,10 +310,7 @@ pub async fn stub_sign(State(app): State<Arc<App>>, session: Session, Path((id, 
         Err(r) => return r,
     };
     if rt.kind != ProviderKind::Stub {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ApiError { code: "not_found", detail: "stub sign is only on the stub provider".into() }),
-        )
+        return (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "stub sign is only on the stub provider".into() }))
             .into_response();
     }
     match stub_mark_signed(rt, &session.user, &id, &recipient).await {
@@ -388,28 +347,18 @@ pub async fn webhook(State(app): State<Arc<App>>, headers: HeaderMap, body: axum
         Ok(r) => r,
         Err(r) => return r,
     };
-    let hdrs: Vec<(String, String)> = headers
-        .iter()
-        .filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned())))
-        .collect();
+    let hdrs: Vec<(String, String)> = headers.iter().filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned()))).collect();
     match rt.kind {
         ProviderKind::Stub => {
             // Stub accepts a JSON array of EnvelopeEvent for tests.
             match serde_json::from_slice::<Vec<EnvelopeEvent>>(&body) {
                 Ok(events) => {
                     for ev in &events {
-                        let _ = rt
-                            .store
-                            .append_event(&ev.envelope_id, &ev.kind, ev.recipient_id.as_deref(), ev.detail.as_deref())
-                            .await;
+                        let _ = rt.store.append_event(&ev.envelope_id, &ev.kind, ev.recipient_id.as_deref(), ev.detail.as_deref()).await;
                     }
                     Json(events).into_response()
                 }
-                Err(e) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiError { code: "invalid", detail: e.to_string() }),
-                )
-                    .into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(ApiError { code: "invalid", detail: e.to_string() })).into_response(),
             }
         }
         ProviderKind::Documenso => match documenso::ingest(rt, &hdrs, &body).await {
@@ -433,11 +382,7 @@ pub async fn land_signer(State(app): State<Arc<App>>, Path(key): Path<String>) -
             "email": info.email,
         }))
         .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError { code: "not_found", detail: "this link no longer works".into() }),
-        )
-            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(ApiError { code: "not_found", detail: "this link no longer works".into() })).into_response(),
         Err(e) => esign_fail(e),
     }
 }
@@ -455,10 +400,7 @@ fn new_id() -> String {
 
 fn now_rfc3339() -> String {
     // Keep the service free of a chrono dependency: unix seconds as a stable stamp.
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     format!("{secs}")
 }
 

@@ -258,7 +258,12 @@ pub struct WriteQuery {
 }
 
 /// Replace the document's bytes, if the share still allows it.
-pub async fn write(State(app): State<Arc<App>>, InviteSession(session): InviteSession, Query(q): Query<WriteQuery>, body: axum::body::Bytes) -> Response {
+pub async fn write(
+    State(app): State<Arc<App>>,
+    InviteSession(session): InviteSession,
+    Query(q): Query<WriteQuery>,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
     let (link, _, permission) = match standing(&app, guest).await {
         Ok(v) => v,

@@ -197,10 +197,7 @@ pub fn esign_capabilities() -> Call<EsignCaps> {
 }
 
 pub fn esign_create(draft: &EnvelopeDraft, document: &[u8], idempotency_key: &str, send: bool) -> Result<Call<Envelope>> {
-    Ok(Call::json(posting(
-        format!("{API}/esign/envelopes"),
-        &EsignCreate { draft, document, idempotency_key, send },
-    )?))
+    Ok(Call::json(posting(format!("{API}/esign/envelopes"), &EsignCreate { draft, document, idempotency_key, send })?))
 }
 
 pub fn esign_send(id: &str) -> Result<Call<Envelope>> {
@@ -224,10 +221,7 @@ pub fn esign_void(id: &str, reason: &str) -> Result<Call<()>> {
 }
 
 pub fn esign_remind(id: &str, recipient: &str) -> Result<Call<()>> {
-    Ok(Call::nothing(posting(
-        format!("{API}/esign/envelopes/{}/remind/{}", enc(id), enc(recipient)),
-        &(),
-    )?))
+    Ok(Call::nothing(posting(format!("{API}/esign/envelopes/{}/remind/{}", enc(id), enc(recipient)), &())?))
 }
 
 /// `&if_match=…`, or nothing at all.

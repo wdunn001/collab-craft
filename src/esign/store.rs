@@ -78,13 +78,12 @@ impl EsignStore {
     }
 
     pub async fn by_idempotency(&self, owner: &str, key: &str) -> craft_esign::Result<Option<Envelope>> {
-        let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT envelope_json FROM esign_envelopes WHERE owner = $1 AND idempotency_key = $2")
-                .bind(owner)
-                .bind(key)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db)?;
+        let row: Option<(serde_json::Value,)> = sqlx::query_as("SELECT envelope_json FROM esign_envelopes WHERE owner = $1 AND idempotency_key = $2")
+            .bind(owner)
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
         match row {
             Some((json,)) => Ok(Some(serde_json::from_value(json).map_err(|e| craft_esign::Error::malformed("envelope", e.to_string()))?)),
             None => Ok(None),
@@ -93,28 +92,25 @@ impl EsignStore {
 
     pub async fn insert(&self, owner: &str, idempotency_key: &str, env: &Envelope, document: &[u8]) -> craft_esign::Result<()> {
         let json = serde_json::to_value(env).map_err(|e| craft_esign::Error::malformed("envelope", e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO esign_envelopes (id, owner, idempotency_key, envelope_json, document) VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(&env.id)
-        .bind(owner)
-        .bind(idempotency_key)
-        .bind(json)
-        .bind(document)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
+        sqlx::query("INSERT INTO esign_envelopes (id, owner, idempotency_key, envelope_json, document) VALUES ($1,$2,$3,$4,$5)")
+            .bind(&env.id)
+            .bind(owner)
+            .bind(idempotency_key)
+            .bind(json)
+            .bind(document)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
         Ok(())
     }
 
     pub async fn get(&self, owner: &str, id: &str) -> craft_esign::Result<Option<Envelope>> {
-        let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT envelope_json FROM esign_envelopes WHERE owner = $1 AND id = $2")
-                .bind(owner)
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db)?;
+        let row: Option<(serde_json::Value,)> = sqlx::query_as("SELECT envelope_json FROM esign_envelopes WHERE owner = $1 AND id = $2")
+            .bind(owner)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
         match row {
             Some((json,)) => Ok(Some(serde_json::from_value(json).map_err(|e| craft_esign::Error::malformed("envelope", e.to_string()))?)),
             None => Ok(None),
@@ -138,13 +134,12 @@ impl EsignStore {
     }
 
     pub async fn document_bytes(&self, owner: &str, id: &str) -> craft_esign::Result<Vec<u8>> {
-        let row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT document FROM esign_envelopes WHERE owner = $1 AND id = $2")
-                .bind(owner)
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db)?;
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT document FROM esign_envelopes WHERE owner = $1 AND id = $2")
+            .bind(owner)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
         row.map(|(b,)| b).ok_or_else(|| craft_esign::Error::invalid("envelope", "not found"))
     }
 
@@ -165,14 +160,13 @@ impl EsignStore {
     }
 
     pub async fn completed(&self, owner: &str, id: &str) -> craft_esign::Result<CompletedDocument> {
-        let row: Option<(serde_json::Value, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
-            "SELECT envelope_json, completed, evidence FROM esign_envelopes WHERE owner = $1 AND id = $2",
-        )
-        .bind(owner)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db)?;
+        let row: Option<(serde_json::Value, Option<Vec<u8>>, Option<Vec<u8>>)> =
+            sqlx::query_as("SELECT envelope_json, completed, evidence FROM esign_envelopes WHERE owner = $1 AND id = $2")
+                .bind(owner)
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db)?;
         let Some((json, completed, evidence)) = row else {
             return Err(craft_esign::Error::invalid("envelope", "not found"));
         };
@@ -180,20 +174,10 @@ impl EsignStore {
         if env.status != EnvelopeStatus::Completed {
             return Err(craft_esign::Error::ProviderPolicy("envelope is not completed".into()));
         }
-        Ok(CompletedDocument {
-            envelope_id: id.to_owned(),
-            bytes: completed.unwrap_or_default(),
-            evidence: evidence.unwrap_or_default(),
-        })
+        Ok(CompletedDocument { envelope_id: id.to_owned(), bytes: completed.unwrap_or_default(), evidence: evidence.unwrap_or_default() })
     }
 
-    pub async fn append_event(
-        &self,
-        envelope_id: &str,
-        kind: &str,
-        recipient_id: Option<&str>,
-        detail: Option<&str>,
-    ) -> craft_esign::Result<()> {
+    pub async fn append_event(&self, envelope_id: &str, kind: &str, recipient_id: Option<&str>, detail: Option<&str>) -> craft_esign::Result<()> {
         sqlx::query("INSERT INTO esign_events (envelope_id, kind, recipient_id, detail) VALUES ($1,$2,$3,$4)")
             .bind(envelope_id)
             .bind(kind)
@@ -205,19 +189,10 @@ impl EsignStore {
         Ok(())
     }
 
-    pub async fn mint_signer_link(
-        &self,
-        owner: &str,
-        envelope_id: &str,
-        recipient_id: &str,
-        email: &str,
-    ) -> craft_esign::Result<String> {
+    pub async fn mint_signer_link(&self, owner: &str, envelope_id: &str, recipient_id: &str, email: &str) -> craft_esign::Result<String> {
         let key = Key::mint();
         let verifier = esign_signer_verifier(&self.secret, &key)?;
-        let exp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64 + 7 * 24 * 3600)
-            .unwrap_or(0);
+        let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 + 7 * 24 * 3600).unwrap_or(0);
         sqlx::query(
             "INSERT INTO esign_signer_links (handle, verifier, owner, envelope_id, recipient_id, email, exp, max_uses)
              VALUES ($1,$2,$3,$4,$5,$6,$7,1)
@@ -252,26 +227,18 @@ impl EsignStore {
         if expected != verifier {
             return Err(craft_esign::Error::invalid("link", "mismatch"));
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         if now > exp || spent >= max_uses {
             return Ok(None);
         }
-        sqlx::query("UPDATE esign_signer_links SET spent = spent + 1 WHERE handle = $1")
-            .bind(&key.handle)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
+        sqlx::query("UPDATE esign_signer_links SET spent = spent + 1 WHERE handle = $1").bind(&key.handle).execute(&self.pool).await.map_err(db)?;
         Ok(Some(SignerLinkInfo { envelope_id, recipient_id, email }))
     }
 }
 
 /// HMAC domain separate from document keyed links (`keyed-link:`).
 fn esign_signer_verifier(secret: &[u8], key: &Key) -> craft_esign::Result<String> {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret)
-        .map_err(|_| craft_esign::Error::ProviderPolicy("bad secret".into()))?;
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).map_err(|_| craft_esign::Error::ProviderPolicy("bad secret".into()))?;
     mac.update(format!("esign-signer:{}", key.wire()).as_bytes());
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }

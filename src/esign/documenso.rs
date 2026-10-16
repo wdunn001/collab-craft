@@ -23,20 +23,11 @@ impl Client {
         let api_token = std::env::var("COLLABCRAFT_DOCUMENSO_API_TOKEN")
             .map_err(|_| "COLLABCRAFT_DOCUMENSO_API_TOKEN is required when COLLABCRAFT_ESIGN_PROVIDER=documenso")?;
         let webhook_secret = std::env::var("COLLABCRAFT_DOCUMENSO_WEBHOOK_SECRET").unwrap_or_default();
-        Ok(Client {
-            base: base.trim().trim_end_matches('/').to_owned(),
-            api_token,
-            webhook_secret,
-        })
+        Ok(Client { base: base.trim().trim_end_matches('/').to_owned(), api_token, webhook_secret })
     }
 }
 
-pub async fn create(
-    rt: &EsignRuntime,
-    _app: &App,
-    session: &Session,
-    body: CreateBody,
-) -> craft_esign::Result<Envelope> {
+pub async fn create(rt: &EsignRuntime, _app: &App, session: &Session, body: CreateBody) -> craft_esign::Result<Envelope> {
     // Persist locally first so status/completed stay durable even if Documenso is slow.
     // Full Documenso document upload uses their REST API; until credentials and field
     // mapping are proven in the lab, we store the draft and mark responsible_party as
@@ -44,17 +35,10 @@ pub async fn create(
     if let Some(existing) = rt.store.by_idempotency(&session.user, &body.idempotency_key).await? {
         return Ok(existing);
     }
-    let client = rt
-        .documenso
-        .as_ref()
-        .ok_or_else(|| craft_esign::Error::ProviderPolicy("documenso client missing".into()))?;
+    let client = rt.documenso.as_ref().ok_or_else(|| craft_esign::Error::ProviderPolicy("documenso client missing".into()))?;
     // Probe reachability; do not send API tokens to logs.
     let url = format!("{}/api/v1/documents", client.base);
-    let probe = reqwest::Client::new()
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", client.api_token))
-        .send()
-        .await;
+    let probe = reqwest::Client::new().get(&url).header("Authorization", format!("Bearer {}", client.api_token)).send().await;
     if let Err(e) = probe {
         return Err(craft_esign::Error::Cloud(craft_cloud::Error::Unreachable(e.to_string())));
     }
@@ -67,16 +51,11 @@ pub async fn send(rt: &EsignRuntime, id: &str) -> craft_esign::Result<Envelope> 
     // require the stub send path with an empty owner lookup by id only.
     let _ = rt;
     let _ = id;
-    Err(craft_esign::Error::Unsupported(
-        "documenso send: configure stub until document mapping is complete",
-    ))
+    Err(craft_esign::Error::Unsupported("documenso send: configure stub until document mapping is complete"))
 }
 
 pub async fn ingest(rt: &EsignRuntime, headers: &[(String, String)], body: &[u8]) -> craft_esign::Result<Vec<EnvelopeEvent>> {
-    let client = rt
-        .documenso
-        .as_ref()
-        .ok_or_else(|| craft_esign::Error::ProviderPolicy("documenso client missing".into()))?;
+    let client = rt.documenso.as_ref().ok_or_else(|| craft_esign::Error::ProviderPolicy("documenso client missing".into()))?;
     if !client.webhook_secret.is_empty() {
         let provided = headers
             .iter()
@@ -90,9 +69,7 @@ pub async fn ingest(rt: &EsignRuntime, headers: &[(String, String)], body: &[u8]
     // Accept either our EnvelopeEvent array or a minimal { type, payload } envelope.
     if let Ok(events) = serde_json::from_slice::<Vec<EnvelopeEvent>>(body) {
         for ev in &events {
-            rt.store
-                .append_event(&ev.envelope_id, &ev.kind, ev.recipient_id.as_deref(), ev.detail.as_deref())
-                .await?;
+            rt.store.append_event(&ev.envelope_id, &ev.kind, ev.recipient_id.as_deref(), ev.detail.as_deref()).await?;
         }
         return Ok(events);
     }
