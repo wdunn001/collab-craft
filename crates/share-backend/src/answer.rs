@@ -28,7 +28,6 @@ pub(crate) fn asked(grant: Grant, app: Option<&str>) -> ShareRequest {
         app: app.map(str::to_owned),
         password: grant.password,
         expires: None,
-        app: app.map(str::to_owned),
     }
 }
 
