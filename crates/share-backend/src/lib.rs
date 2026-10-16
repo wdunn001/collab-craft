@@ -159,6 +159,7 @@ impl ShareBackend for CollabCraft {
 
 /// One request, on a thread of its own.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // kept as the no-app entry; callers that pin an app use `run_for`
 fn run(client: &Client, request: Request) -> Result<Answer, String> {
     run_for(client, request, None)
 }
