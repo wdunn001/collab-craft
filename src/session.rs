@@ -133,9 +133,41 @@ impl FromRequestParts<Arc<App>> for Session {
 ///
 /// A signed-in account wins over a keyed link. Somebody who is signed in and
 /// then follows an invitation is still that person, and they hold more than
-/// the invitation grants.
+/// the invitation grants — on every route except the invite ones, which use
+/// [`carried_invite`] so the document they were sent still opens.
 fn carried(parts: &Parts) -> Option<String> {
     bearer(parts).or_else(|| cookie(parts, COOKIE)).or_else(|| cookie(parts, GUEST_COOKIE))
+}
+
+/// The session id for `/api/v1/invite/*`.
+///
+/// The landing page sets a guest cookie and then hands the browser to an app
+/// build. A signed-in account cookie still wins on ordinary routes, but the
+/// invite routes must read the guest: otherwise `invite_token` answers
+/// `not_a_recipient`, the app treats the load as ordinary, and the recipient
+/// (or a sharer testing their own link) sees an empty document.
+fn carried_invite(parts: &Parts) -> Option<String> {
+    bearer(parts).or_else(|| cookie(parts, GUEST_COOKIE)).or_else(|| cookie(parts, COOKIE))
+}
+
+/// A session taken for the keyed-link recipient routes.
+///
+/// Prefers the guest cookie so a signed-in browser that just followed an
+/// invite still opens the shared document. Ordinary routes keep using
+/// [`Session`], where the account wins.
+pub struct InviteSession(pub Session);
+
+impl FromRequestParts<Arc<App>> for InviteSession {
+    type Rejection = NoSession;
+
+    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<InviteSession, NoSession> {
+        if let Some(id) = carried_invite(parts)
+            && let Some(session) = app.store.session(&id).await
+        {
+            return Ok(InviteSession(session));
+        }
+        Err(NoSession)
+    }
 }
 
 fn bearer(parts: &Parts) -> Option<String> {

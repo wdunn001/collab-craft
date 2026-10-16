@@ -24,7 +24,7 @@ use crate::api::ApiError;
 use crate::keyed::{self, Key, Link, Refusal};
 // One escaper for every page this service renders. Two would be one too many.
 use crate::pages::escape;
-use crate::session::{GUEST_COOKIE, Guest, Session, random_id};
+use crate::session::{GUEST_COOKIE, Guest, InviteSession, Session, random_id};
 use crate::state::App;
 
 /// What a refusal looks like to somebody who followed a link.
@@ -208,7 +208,7 @@ pub struct Join {
 ///
 /// Separate from the ordinary token route because that one acts as the
 /// signed-in user against the provider, and a recipient is not one.
-pub async fn token(State(app): State<Arc<App>>, session: Session) -> Response {
+pub async fn token(State(app): State<Arc<App>>, InviteSession(session): InviteSession) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
     let (link, entry, permission) = match standing(&app, guest).await {
         Ok(v) => v,
@@ -231,7 +231,7 @@ pub async fn token(State(app): State<Arc<App>>, session: Session) -> Response {
 }
 
 /// The document's bytes, read as the sharer.
-pub async fn read(State(app): State<Arc<App>>, session: Session) -> Response {
+pub async fn read(State(app): State<Arc<App>>, InviteSession(session): InviteSession) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
     let (link, _, _) = match standing(&app, guest).await {
         Ok(v) => v,
@@ -258,7 +258,7 @@ pub struct WriteQuery {
 }
 
 /// Replace the document's bytes, if the share still allows it.
-pub async fn write(State(app): State<Arc<App>>, session: Session, Query(q): Query<WriteQuery>, body: axum::body::Bytes) -> Response {
+pub async fn write(State(app): State<Arc<App>>, InviteSession(session): InviteSession, Query(q): Query<WriteQuery>, body: axum::body::Bytes) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
     let (link, _, permission) = match standing(&app, guest).await {
         Ok(v) => v,

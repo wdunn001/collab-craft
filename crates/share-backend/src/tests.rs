@@ -83,6 +83,7 @@ fn a_grant_becomes_the_services_share_request() {
     assert_eq!(asked.app.as_deref(), Some("gridcraft"));
     assert_eq!(asked.password.as_deref(), Some("key"));
     assert_eq!(asked.expires, None, "the dialog has no field for an expiry, and inventing one would end a share nobody asked to end");
+    assert_eq!(asked.app.as_deref(), Some("gridcraft"), "the sharing app names where a keyed invite lands");
 }
 
 #[test]
