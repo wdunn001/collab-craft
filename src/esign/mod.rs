@@ -443,9 +443,8 @@ pub async fn land_signer(State(app): State<Arc<App>>, Path(key): Path<String>) -
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    format!("{:x}", h.finalize())
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn new_id() -> String {
