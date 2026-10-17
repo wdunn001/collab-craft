@@ -94,6 +94,18 @@ fn not_linked() -> Response {
 
 // ---- who am I -------------------------------------------------------------
 
+/// Where to open the provider's conversation app when no document is in hand.
+///
+/// Document rooms still go through [`conversation`]. This is the empty lobby:
+/// the launcher and the CollabCraft home page open it so somebody can chat
+/// without first opening a Craft document.
+#[derive(Serialize)]
+pub struct ConversationHome {
+    /// What the provider calls it (Talk, …).
+    pub name: String,
+    pub url: String,
+}
+
 #[derive(Serialize)]
 pub struct Me {
     pub id: String,
@@ -112,6 +124,10 @@ pub struct Me {
     pub service: Vec<crate::state::ServiceCapability>,
     /// Until an account is linked, Open and Save have nowhere to go.
     pub provider_linked: bool,
+    /// The provider's conversation lobby, when it has one. Absent where chat is
+    /// unsupported, so a launcher draws no Talk button rather than a dead one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<ConversationHome>,
 }
 
 pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
@@ -127,11 +143,25 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             capabilities: Vec::new(),
             service,
             provider_linked: false,
+            conversation: None,
         })
         .into_response();
     };
 
     let capabilities = provider.capabilities();
+    // Lobby URL for chat with nothing open. Document rooms still use
+    // conversation(); this is only for the launcher / CollabCraft home.
+    let conversation = if capabilities.contains(&craft_cloud::Capability::Conversation) {
+        match craft_cloud::Conversations::conversation_name(provider.as_ref()) {
+            Some(name) => app.provider_config().await.map(|(cfg, _)| ConversationHome {
+                name,
+                url: format!("{}/apps/spreed", cfg.base.trim_end_matches('/')),
+            }),
+            None => None,
+        }
+    } else {
+        None
+    };
     let p = provider.clone();
     let identity = tokio::task::spawn_blocking(move || craft_cloud::Accounts::me(p.as_ref())).await;
     match identity {
@@ -144,6 +174,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             capabilities,
             service,
             provider_linked: true,
+            conversation,
         })
         .into_response(),
         Ok(Err(e)) => fail(e),
