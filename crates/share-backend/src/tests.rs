@@ -57,6 +57,7 @@ fn me(email: Option<&str>, linked: bool) -> Me {
         apps: Vec::new(),
         capabilities: vec![Capability::Sharing],
         provider_linked: linked,
+        conversation: None,
     }
 }
 
