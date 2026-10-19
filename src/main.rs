@@ -32,10 +32,12 @@ mod api;
 mod auth;
 mod bus;
 mod esign;
+mod google;
 mod keyed;
 mod pages;
 mod recipient;
 mod room;
+mod route;
 mod session;
 mod settings;
 mod state;
@@ -262,7 +264,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/link", axum::routing::post(pages::link_begin))
         .route("/account/link/finish", axum::routing::post(pages::link_finish))
         .route("/account/link/password", axum::routing::post(pages::link_password))
+        .route("/account/link/google", axum::routing::get(pages::google_finish))
         .route("/account/unlink", axum::routing::post(pages::unlink))
+        .route("/account/connection/default", axum::routing::post(pages::connection_default))
         .route("/account/signout", axum::routing::post(pages::signout))
         .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save))
         .route("/settings/apps", axum::routing::get(pages::apps).post(pages::apps_save));
