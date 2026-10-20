@@ -209,6 +209,16 @@ impl Conversations for Routed {
         let (provider, raw) = self.open(id)?;
         provider.conversation(&raw, title)
     }
+
+    fn messages(&self, id: &str, after: Option<&str>) -> Result<Vec<craft_cloud::ChatMessage>> {
+        let (provider, raw) = self.open(id)?;
+        provider.messages(&raw, after)
+    }
+
+    fn post_message(&self, id: &str, text: &str) -> Result<craft_cloud::ChatMessage> {
+        let (provider, raw) = self.open(id)?;
+        provider.post_message(&raw, text)
+    }
 }
 
 impl Provider for Routed {

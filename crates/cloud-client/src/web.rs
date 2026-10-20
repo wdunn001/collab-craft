@@ -286,6 +286,17 @@ impl Client {
         self.call(req::conversation(id)).await
     }
 
+    /// A document conversation's messages, oldest first (`after`: the newest id
+    /// already held).
+    pub async fn messages(&self, id: &str, after: Option<&str>) -> Result<Vec<craft_cloud::ChatMessage>> {
+        self.call(req::messages(id, after)).await
+    }
+
+    /// Send a message to a document's conversation.
+    pub async fn post_message(&self, id: &str, text: &str) -> Result<craft_cloud::ChatMessage> {
+        self.call(req::post_message(id, text)).await
+    }
+
     /// A relay token for one document, plus where to take it.
     pub async fn join(&self, id: &str) -> Result<Join> {
         self.call(req::join(id)).await

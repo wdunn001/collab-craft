@@ -27,9 +27,9 @@ todo = "warn"
 # craft-ui speaks the craft-cloud vocabulary, so two revisions put two
 # `Permission` types in one binary and nothing can be passed between them.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "316a7addce818e22fc588b476b6a90ef27a4b42c" }
-craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "316a7addce818e22fc588b476b6a90ef27a4b42c" }
-craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "316a7addce818e22fc588b476b6a90ef27a4b42c" }
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "461b6e4fb29dc2d81aab7958f61988d8d383390c" }
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "461b6e4fb29dc2d81aab7958f61988d8d383390c" }
+craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "461b6e4fb29dc2d81aab7958f61988d8d383390c" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }

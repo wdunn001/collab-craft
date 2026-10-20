@@ -10,8 +10,8 @@
 //! surface, which is what an application actually holds.
 
 use craft_cloud::{
-    Capability, Contact as CloudContact, Conversation as CloudConversation, Entry as CloudEntry, EntryKind, Error as CloudError, Identity,
-    MailMessage, Notification, Permission, Result as CloudResult, Share as CloudShare, ShareOptions, ShareTarget,
+    Capability, ChatMessage as CloudChatMessage, Contact as CloudContact, Conversation as CloudConversation, Entry as CloudEntry, EntryKind,
+    Error as CloudError, Identity, MailMessage, Notification, Permission, Result as CloudResult, Share as CloudShare, ShareOptions, ShareTarget,
 };
 
 use crate::http::{Http, Method};
@@ -367,6 +367,59 @@ const SHARE_TYPE_GROUP: i64 = 1;
 const SHARE_TYPE_EMAIL: i64 = 4;
 
 impl<H: Http> Nextcloud<H> {
+    /// The Talk room token for a document, finding or creating the room.
+    ///
+    /// The room is keyed on the file's numeric id, which survives a rename, so
+    /// everybody talking about one document lands in one place. OwnCloud has
+    /// no Talk, and a file with no stable id has nothing to key a room on.
+    fn room_token(&self, id: &str) -> CloudResult<String> {
+        if self.flavor == Flavor::OwnCloud {
+            return Err(CloudError::Unsupported("conversations"));
+        }
+        let file_id = craft_cloud::Files::stat(self, id)?.room;
+        if file_id.is_empty() || !file_id.chars().all(|c| c.is_ascii_digit()) {
+            return Err(CloudError::Unsupported("conversations for this entry"));
+        }
+        let base = self.account.base().trim_end_matches('/');
+        let url = format!("{base}/ocs/v2.php/apps/spreed/api/v1/file/{file_id}");
+        // GET returns the room when the file already has one. A file never
+        // talked about answers 404, and POST on the same path creates it (or
+        // returns the one a race just made).
+        let existing = send(&self.http, self.account.request(Method::Get, url.clone()).header("accept", "application/json"));
+        let resp = match existing {
+            Ok(resp) => resp,
+            Err(_) => send(&self.http, self.account.request(Method::Post, url).header("accept", "application/json")).map_err(lift)?,
+        };
+        let body = serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|e| CloudError::malformed("talk conversation", e.to_string()))?;
+        body.pointer("/ocs/data/token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| CloudError::malformed("talk conversation", "the answer carried no room token"))
+    }
+
+    /// One Talk chat row as a [`CloudChatMessage`], or `None` for a row that is
+    /// not a person's message (a system note such as a join or a call).
+    fn chat_message(&self, row: &serde_json::Value, me: &str) -> Option<CloudChatMessage> {
+        if row.get("systemMessage").and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty()) {
+            return None;
+        }
+        let id = match row.get("id")? {
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            _ => return None,
+        };
+        let actor_type = row.get("actorType").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let actor_id = row.get("actorId").and_then(serde_json::Value::as_str).unwrap_or_default();
+        Some(CloudChatMessage {
+            id,
+            author: row.get("actorDisplayName").and_then(serde_json::Value::as_str).unwrap_or(actor_id).to_owned(),
+            text: row.get("message").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            at: row.get("timestamp").and_then(serde_json::Value::as_i64).unwrap_or_default(),
+            mine: actor_type == "users" && actor_id == me,
+        })
+    }
+
     /// Accounts, groups and known addresses, from Nextcloud's own sharee
     /// search.
     ///
@@ -584,32 +637,52 @@ impl<H: Http> craft_cloud::Conversations for Nextcloud<H> {
     }
 
     fn conversation(&self, id: &str, _title: &str) -> CloudResult<CloudConversation> {
-        if self.flavor == Flavor::OwnCloud {
-            return Err(CloudError::Unsupported("conversations"));
-        }
-        let file_id = craft_cloud::Files::stat(self, id)?.room;
-        if file_id.is_empty() || !file_id.chars().all(|c| c.is_ascii_digit()) {
-            // Without a file id there is nothing stable to key a room on, and a
-            // room keyed on a path splits in two the moment somebody renames.
-            return Err(CloudError::Unsupported("conversations for this entry"));
-        }
-        let base = self.account.base().trim_end_matches('/').to_owned();
-        let url = format!("{base}/ocs/v2.php/apps/spreed/api/v1/file/{file_id}");
-        // GET returns the room when the file already has one. A file that has
-        // never been talked about answers 404, and POST on the same path
-        // creates the room (or returns the one a race just created).
-        let existing = send(&self.http, self.account.request(Method::Get, url.clone()).header("accept", "application/json"));
-        let resp = match existing {
-            Ok(resp) => resp,
-            Err(_) => send(&self.http, self.account.request(Method::Post, url).header("accept", "application/json")).map_err(lift)?,
-        };
-        let body = serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|e| CloudError::malformed("talk conversation", e.to_string()))?;
-        let token = body
-            .pointer("/ocs/data/token")
-            .and_then(serde_json::Value::as_str)
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| CloudError::malformed("talk conversation", "the answer carried no room token"))?;
+        let token = self.room_token(id)?;
+        let base = self.account.base().trim_end_matches('/');
         Ok(CloudConversation { url: format!("{base}/call/{token}"), name: "Talk".to_owned() })
+    }
+
+    fn messages(&self, id: &str, after: Option<&str>) -> CloudResult<Vec<CloudChatMessage>> {
+        let token = self.room_token(id)?;
+        let base = self.account.base().trim_end_matches('/');
+        // After a known id: the messages newer than it, returned at once
+        // (`timeout=0`, so the caller polls on its own clock rather than this
+        // holding a socket open). On first open: the most recent history,
+        // which Talk returns newest first.
+        let url = match after {
+            Some(last) => format!(
+                "{base}/ocs/v2.php/apps/spreed/api/v1/chat/{token}?lookIntoFuture=1&lastKnownMessageId={last}&timeout=0&limit=200&setReadMarker=0"
+            ),
+            None => format!("{base}/ocs/v2.php/apps/spreed/api/v1/chat/{token}?lookIntoFuture=0&limit=50&setReadMarker=0"),
+        };
+        let resp = send(&self.http, self.account.request(Method::Get, url).header("accept", "application/json")).map_err(lift)?;
+        // 304: the room has nothing newer than `last`.
+        if resp.status == 304 {
+            return Ok(Vec::new());
+        }
+        let body = serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|e| CloudError::malformed("talk chat", e.to_string()))?;
+        let rows = body.pointer("/ocs/data").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let me = self.account.user();
+        let mut out: Vec<CloudChatMessage> = rows.iter().filter_map(|row| self.chat_message(row, me)).collect();
+        // `lookIntoFuture=0` answers newest first; the panel wants oldest first,
+        // and so that the last element is always the newest for the next poll.
+        if after.is_none() {
+            out.reverse();
+        }
+        Ok(out)
+    }
+
+    fn post_message(&self, id: &str, text: &str) -> CloudResult<CloudChatMessage> {
+        let token = self.room_token(id)?;
+        let base = self.account.base().trim_end_matches('/');
+        // The message rides the query, as the file-room call's parameters do.
+        // OCS binds a controller parameter from the query or the body alike.
+        let url = format!("{base}/ocs/v2.php/apps/spreed/api/v1/chat/{token}?message={}", crate::encode_segment(text));
+        let resp = send(&self.http, self.account.request(Method::Post, url).header("accept", "application/json")).map_err(lift)?;
+        let body = serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|e| CloudError::malformed("talk chat", e.to_string()))?;
+        let row = body.pointer("/ocs/data").ok_or_else(|| CloudError::malformed("talk chat", "the answer carried no message"))?;
+        self.chat_message(row, self.account.user())
+            .ok_or_else(|| CloudError::malformed("talk chat", "the posted message could not be read"))
     }
 }
 
