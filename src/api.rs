@@ -243,30 +243,6 @@ pub async fn conversation(State(app): State<Arc<App>>, session: Session, Query(q
     run(move || p.conversation(&q.id, &title)).await
 }
 
-#[derive(Deserialize)]
-pub struct MessagesQuery {
-    pub id: String,
-    /// The newest message id the caller already holds; absent on first open.
-    #[serde(default)]
-    pub after: Option<String>,
-}
-
-pub async fn messages(State(app): State<Arc<App>>, session: Session, Query(q): Query<MessagesQuery>) -> Response {
-    let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    run(move || p.messages(&q.id, q.after.as_deref())).await
-}
-
-#[derive(Deserialize)]
-pub struct PostMessageQuery {
-    pub id: String,
-    pub text: String,
-}
-
-pub async fn post_message(State(app): State<Arc<App>>, session: Session, Query(q): Query<PostMessageQuery>) -> Response {
-    let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    run(move || p.post_message(&q.id, &q.text)).await
-}
-
 pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>, headers: HeaderMap) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     let range = parse_http_range(headers.get(RANGE)).or(match (q.offset, q.length) {

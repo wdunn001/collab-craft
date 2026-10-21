@@ -9,7 +9,7 @@
 //! and `/api/v1/invite` for somebody who arrived on a keyed link and has no
 //! account to act as.
 
-use craft_cloud::{ChatMessage, Contact, Conversation, Entry, Share};
+use craft_cloud::{Contact, Conversation, Entry, Share};
 use craft_esign::{CompletedDocument, Envelope, EnvelopeDraft};
 use serde::Serialize;
 
@@ -146,18 +146,6 @@ pub fn unshare(share_id: &str) -> Call<()> {
 /// provider is configured.
 pub fn conversation(id: &str) -> Call<Conversation> {
     Call::json(get(format!("{API}/conversation?id={}", enc(id))))
-}
-
-/// A document conversation's messages, oldest first. `after` is the newest id
-/// the caller already holds, so a poll asks only for what it has not seen.
-pub fn messages(id: &str, after: Option<&str>) -> Call<Vec<ChatMessage>> {
-    let after = after.map(|a| format!("&after={}", enc(a))).unwrap_or_default();
-    Call::json(get(format!("{API}/conversation/messages?id={}{after}", enc(id))))
-}
-
-/// Send a message to a document's conversation.
-pub fn post_message(id: &str, text: &str) -> Call<ChatMessage> {
-    Call::json(Request::new(Method::Post, format!("{API}/conversation/message?id={}&text={}", enc(id), enc(text))))
 }
 
 /// A relay token for one document, plus where to take it.
