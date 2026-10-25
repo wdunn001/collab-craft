@@ -22,7 +22,24 @@ pub type DocId = String;
 /// Opaque on purpose. The relay compares scopes for equality and nothing else, so an app chooses
 /// its own granularity: `"B2"` or `"B2:D9"` in GridCraft, `"/body/3"` in WordCraft, a layer id in
 /// PhotoCraft. Two scopes that should not collide must not compare equal.
+///
+/// Commands named `crdt.*` must omit a scope. Their payload is a CRDT operation (RGA text,
+/// fractional position) and concurrent edits in the same region are meant to merge. The
+/// relay strips a scope if a buggy client sends one. GridCraft cells and SolidCraft
+/// feature ops keep using a scope.
 pub type Scope = String;
+
+/// A command whose payload is a CRDT operation (`crdt.text`, `crdt.pos`, ...).
+#[must_use]
+pub fn is_crdt_command(command: &str) -> bool {
+    command.starts_with("crdt.")
+}
+
+/// Insert or delete characters in one text unit. Payload is `craft_crdt::TextOp`.
+pub const CRDT_TEXT: &str = "crdt.text";
+
+/// Insert or move a sibling by fractional key. Payload is a position change.
+pub const CRDT_POS: &str = "crdt.pos";
 
 /// Who is in a document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +74,8 @@ pub enum ClientMsg {
         command: String,
         params: Value,
         /// The region this edit touches, when the app can name one. The relay refuses the edit
-        /// when another peer holds that scope.
+        /// when another peer holds that scope. Must be `None` for [`CRDT_TEXT`] and other
+        /// `crdt.*` commands; the relay strips it if present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<Scope>,
     },

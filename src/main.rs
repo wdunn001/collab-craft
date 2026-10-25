@@ -55,7 +55,7 @@ use socketioxide::extract::{Data, SocketRef, State};
 use tokio::sync::Mutex;
 
 use bus::{Bus, LockOutcome};
-use room::{Op, Peer, Refusal, Room, Submission};
+use room::{Op, Peer, Refusal, Room, Submission, is_crdt_command};
 use token::Claims;
 
 const DEFAULT_VALKEY: &str = "redis://valkey:6379/6";
@@ -384,9 +384,12 @@ async fn on_submit(socket: SocketRef, Data(msg): Data<SubmitMsg>, State(relay): 
     // relay seeing it can get past here. That residual case burns one number
     // and recovers by resync, which is the rare path rather than the common
     // one.
+    // crdt.* commands merge; a scope on them is a client bug and is stripped
+    // before the lock check so a held region cannot refuse the edit.
+    let scope = if is_crdt_command(&msg.command) { None } else { msg.scope };
     let preflight = {
         let rooms = relay.rooms.lock().await;
-        let holder = rooms.get(&claims.rm).and_then(|r| msg.scope.as_deref().and_then(|sc| r.holder_of(sc))).map(str::to_owned);
+        let holder = rooms.get(&claims.rm).and_then(|r| scope.as_deref().and_then(|sc| r.holder_of(sc))).map(str::to_owned);
         match holder {
             Some(h) if h != claims.pid => Err(Refusal::Locked { holder: h }),
             _ if !claims.may_edit() => Err(Refusal::ReadOnly),
@@ -426,7 +429,7 @@ async fn on_submit(socket: SocketRef, Data(msg): Data<SubmitMsg>, State(relay): 
                 may_edit: claims.may_edit(),
                 command: msg.command,
                 params: msg.params,
-                scope: msg.scope,
+                scope,
                 local: msg.local,
             },
         )

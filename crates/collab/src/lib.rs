@@ -2,8 +2,13 @@
 //!
 //! The relay assigns a strictly increasing sequence to every edit, and each client applies edits
 //! in that order. Concurrent work in different regions proceeds freely. Concurrent work in the
-//! same region is serialised by a scope lock. That is deliberately short of a CRDT, which would
-//! require stable identity for positions and a rewrite of each app's document model.
+//! same region is serialised by a scope lock, unless the command is `crdt.*`. Those carry
+//! [`craft_crdt`](https://github.com/storytold/craft-libs) operations (RGA text, fractional
+//! keys) and skip the lock: two people can type in the same paragraph and both insertions
+//! survive. CAD booleans and renders still take a lock, because they do not commute.
+//!
+//! Sequence numbers are a delivery order for catch-up. Merge correctness for `crdt.*` comes
+//! from character identities and frac keys, not from seq.
 //!
 //! Three pieces:
 //!
@@ -54,5 +59,5 @@ mod tests;
 
 pub use error::{Error, Result};
 pub use hub::{EVENTS, Hub, decode, emit, encode, receive};
-pub use proto::{ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerMsg};
+pub use proto::{CRDT_POS, CRDT_TEXT, ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerMsg, is_crdt_command};
 pub use session::{Effect, Session};
