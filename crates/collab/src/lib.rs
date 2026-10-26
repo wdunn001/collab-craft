@@ -10,17 +10,20 @@
 //! Sequence numbers are a delivery order for catch-up. Merge correctness for `crdt.*` comes
 //! from character identities and frac keys, not from seq.
 //!
-//! Three pieces:
+//! Four pieces:
 //!
 //! * [`proto`] is the wire protocol, two enums and nothing else.
 //! * [`Session`] orders, deduplicates and tracks locks. It performs no IO and returns [`Effect`]
 //!   values describing what the app should do.
 //! * [`Hub`] is the transport seam a caller implements, intended for Socket.IO at both ends.
+//! * [`crdt`] is the per-scope RGA text replica, and [`Live`] pumps a hub plus those replicas.
+//!   That is the shared solution. It does not live in `craft-cloud` (files) and it does not
+//!   live in one app's desktop binary.
 //!
 //! A command is a name plus opaque JSON, matching the `CommandSpec` shape every Craft app already
 //! has, and a lock scope is an opaque string each app reads its own way. So nothing here is tied
-//! to one app. GridCraft is the easiest first mover, because its commands already carry their own
-//! cell address while WordCraft's act on the local caret.
+//! to one app. WordCraft maps a paragraph path. GridCraft maps a cell address. CAD booleans still
+//! take a lock.
 //!
 //! ```
 //! use craft_collab::{Effect, Session};
@@ -35,10 +38,13 @@
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod crdt;
 mod error;
 mod hub;
+mod live;
 pub mod proto;
 mod session;
+mod token;
 
 /// A [`Hub`] over `rust_socketio`, for native apps.
 ///
@@ -57,7 +63,10 @@ pub mod web;
 #[cfg(test)]
 mod tests;
 
+pub use crdt::{TextPayload, Texts, char_pos, space_for};
 pub use error::{Error, Result};
 pub use hub::{EVENTS, Hub, decode, emit, encode, receive};
+pub use live::{Live, Work};
 pub use proto::{CRDT_POS, CRDT_TEXT, ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerMsg, is_crdt_command};
 pub use session::{Effect, Session};
+pub use token::doc_from_token;

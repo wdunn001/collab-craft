@@ -25,6 +25,9 @@ use craft_cloud::{Entry, Permission};
 use craft_collab::web::WebHub;
 use wasm_bindgen::JsCast;
 
+/// A relay session held by a browser app for as long as the document is open.
+pub type Relay = craft_collab::Live<WebHub>;
+
 use super::{Verdict, sentence, verdict};
 use crate::{Client, InviteJoin, Result};
 
@@ -91,8 +94,17 @@ impl Invitation {
     /// An error here is not a reason to refuse the document. The recipient
     /// came to read one document and they have it. A caller says so in
     /// passing and carries on.
+    ///
+    /// Dropping the hub closes the socket. Prefer [`Invitation::live`] and hold
+    /// that value for as long as the document is open.
     pub fn join(&self) -> craft_collab::Result<WebHub> {
         WebHub::connect(&self.join.relay, &self.join.token)
+    }
+
+    /// Connect and keep the session. Same as [`join`], then wrap the hub so
+    /// CRDT text and roster updates survive past this call.
+    pub fn live(&self) -> craft_collab::Result<Relay> {
+        Ok(craft_collab::Live::new(self.join()?, self.room()))
     }
 
     /// How to save back, or `None` when the share is read only.

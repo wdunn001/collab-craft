@@ -128,7 +128,7 @@ pub fn followed_a_link(search: &str) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(target_arch = "wasm32")]
-pub use browser::{Arrival, Invitation, Saver, arrive, arrive_through, refuse};
+pub use browser::{Arrival, Invitation, Relay, Saver, arrive, arrive_through, refuse};
 
 #[cfg(test)]
 mod tests;
