@@ -25,7 +25,7 @@ use crate::session::Session;
 /// `webdav` is every server speaking RFC 4918, which is most of them: SabreDAV,
 /// Apache, nginx, Seafile, a NAS, ownCloud Infinite Scale. It has no sharing,
 /// so the share controls disappear and everything else works.
-pub const KINDS: [&str; 4] = ["nextcloud", "owncloud", "webdav", "google"];
+pub const KINDS: [&str; 5] = ["nextcloud", "owncloud", "webdav", "google", "git"];
 
 /// What to call a kind in a heading.
 pub fn kind_label(kind: &str) -> String {
@@ -34,6 +34,7 @@ pub fn kind_label(kind: &str) -> String {
         "owncloud" => "ownCloud".to_owned(),
         "webdav" => "WebDAV".to_owned(),
         "google" => "Google Drive".to_owned(),
+        "git" => "Git".to_owned(),
         other => crate::pages::capitalise(other),
     }
 }
@@ -234,6 +235,7 @@ pub async fn probe(config: &ProviderConfig) -> Result<(), String> {
         "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp::default(), &config.layout()),
         // Nothing to dial. The client id is checked when somebody connects.
         "google" => Ok(()),
+        "git" => crate::git::probe(&config.base),
         other => Err(format!("this service does not implement a {other} provider")),
     })
     .await;
