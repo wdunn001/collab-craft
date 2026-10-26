@@ -71,6 +71,12 @@ impl Refusal {
     }
 }
 
+/// Commands whose payload is a CRDT operation. They never take a region lock.
+#[must_use]
+pub fn is_crdt_command(command: &str) -> bool {
+    command.starts_with("crdt.")
+}
+
 /// One document.
 ///
 /// The sequence is NOT assigned here. It comes from an `INCR` against the
@@ -141,11 +147,17 @@ impl Room {
     /// A scope held by another peer refuses. A scope held by this peer, or held
     /// by nobody, proceeds. The optimistic case is deliberate: requiring a lock
     /// before every edit would make typing wait for a round trip.
+    ///
+    /// Commands named `crdt.*` never take a lock. Their payload merges, so a
+    /// region lock would only serialize what the CRDT is meant to combine. A
+    /// scope on those commands is stripped so a buggy client cannot lock a
+    /// paragraph by accident.
     pub fn submit(&mut self, seq: u64, s: Submission) -> Result<Op, Refusal> {
         if !s.may_edit {
             return Err(Refusal::ReadOnly);
         }
-        if let Some(scope) = &s.scope
+        let scope = if is_crdt_command(&s.command) { None } else { s.scope };
+        if let Some(scope) = &scope
             && let Some(holder) = self.locks.get(scope)
             && holder != &s.peer_id
         {
@@ -153,7 +165,7 @@ impl Room {
         }
 
         self.seq = self.seq.max(seq);
-        let op = Op { seq, origin: s.peer_id, local: s.local, command: s.command, params: s.params, scope: s.scope };
+        let op = Op { seq, origin: s.peer_id, local: s.local, command: s.command, params: s.params, scope };
 
         self.history.push(op.clone());
         if self.first_in_history == 0 {

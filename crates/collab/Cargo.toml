@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Shared editing for the Craft apps: the relay protocol, a client session that orders and applies remote commands, and scope locks, over a caller-supplied hub"
+description = "Shared editing for the Craft apps: the relay protocol, CRDT text, a client session that orders and applies remote commands, and scope locks, over a caller-supplied hub"
 
 [lints]
 workspace = true
@@ -20,6 +20,7 @@ native-hub = ["dep:rust_socketio", "dep:tokio"]
 web-hub = ["dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
+craft-crdt = { workspace = true }
 js-sys = { workspace = true, optional = true }
 log = { workspace = true }
 rust_socketio = { version = "0.6", features = ["async"], optional = true }

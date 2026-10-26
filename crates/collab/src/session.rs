@@ -152,6 +152,13 @@ impl Session {
         ClientMsg::Submit { doc: self.doc.clone(), local: self.local, command: command.into(), params, scope }
     }
 
+    /// Offer a CRDT operation. Always lock-free: `scope` is omitted even if the
+    /// caller would have named a region. Use this for [`crate::CRDT_TEXT`] and
+    /// other `crdt.*` commands.
+    pub fn submit_crdt(&mut self, command: impl Into<String>, params: Value) -> ClientMsg {
+        self.submit(command, params, None)
+    }
+
     /// How many local edits are awaiting confirmation.
     pub fn inflight(&self) -> usize {
         self.inflight.len()

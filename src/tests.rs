@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::Sha256;
 
-use crate::room::{Peer, Refusal, Room, Submission};
+use crate::room::{Peer, Refusal, Room, Submission, is_crdt_command};
 use crate::token::{self, PERMISSION_READ, PERMISSION_UPDATE, TokenError};
 
 const SECRET: &[u8] = b"a-shared-secret-at-least-32-chars-long";
@@ -153,6 +153,22 @@ fn an_edit_with_no_scope_is_never_blocked() {
     let mut r = room_with(&[("alice", true), ("bob", true)]);
     r.record_lock("bob", "B2".into());
     assert!(r.submit(1, sub("alice", true, "doc.title", json!({}), None)).is_ok());
+}
+
+#[test]
+fn a_crdt_text_edit_ignores_a_held_lock() {
+    assert!(is_crdt_command("crdt.text"));
+    assert!(!is_crdt_command("cell.set"));
+    let mut r = room_with(&[("alice", true), ("bob", true)]);
+    r.record_lock("bob", "B2".into());
+    let op = r.submit(1, sub("alice", true, "crdt.text", json!({"op": "ins"}), Some("B2"))).expect("crdt.text skips the lock");
+    assert!(op.scope.is_none(), "a crdt.* command must not keep the client's scope");
+}
+
+#[test]
+fn a_crdt_command_still_requires_edit_access() {
+    let mut r = room_with(&[("bob", false)]);
+    assert_eq!(r.submit(1, sub("bob", false, "crdt.text", json!({}), None)), Err(Refusal::ReadOnly));
 }
 
 #[test]

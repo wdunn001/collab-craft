@@ -99,6 +99,23 @@ fn an_in_order_remote_op_is_applied() {
 }
 
 #[test]
+fn submit_crdt_omits_the_scope() {
+    let mut s = session();
+    let msg = s.submit_crdt(crate::CRDT_TEXT, json!({"op": "ins", "ch": "a"}));
+    match msg {
+        ClientMsg::Submit { command, scope, .. } => {
+            assert_eq!(command, crate::CRDT_TEXT);
+            assert!(scope.is_none(), "a CRDT submit must not name a region");
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+    assert_eq!(s.inflight(), 1);
+    assert!(crate::is_crdt_command(crate::CRDT_TEXT));
+    assert!(crate::is_crdt_command(crate::CRDT_POS));
+    assert!(!crate::is_crdt_command("cell.set"));
+}
+
+#[test]
 fn our_own_op_is_confirmed_and_never_applied_twice() {
     let mut s = session();
     let msg = s.submit("cell.set", json!({"cell": "B2", "input": "7"}), Some("B2".into()));
