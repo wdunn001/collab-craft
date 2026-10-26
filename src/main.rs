@@ -32,6 +32,7 @@ mod api;
 mod auth;
 mod bus;
 mod esign;
+mod git;
 mod keyed;
 mod pages;
 mod recipient;

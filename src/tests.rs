@@ -1148,6 +1148,10 @@ mod web {
             assert!(ProviderConfig::parse(bad, "https://cloud.example.com").is_err(), "{bad:?} must be refused");
         }
         assert!(ProviderConfig::parse("nextcloud", "https://cloud.example.com").is_ok());
+        assert_eq!(
+            ProviderConfig::parse("git", "https://github.com/fpoussin/solidcraft-designs/").expect("accepted").base,
+            "https://github.com/fpoussin/solidcraft-designs"
+        );
     }
 
     #[test]
@@ -1335,6 +1339,7 @@ mod provider_kinds {
         assert!(link("nextcloud"));
         assert!(!link("owncloud"));
         assert!(!link("webdav"));
+        assert!(!link("git"));
     }
 
     #[test]
@@ -1368,5 +1373,6 @@ mod provider_kinds {
         assert_eq!(kind_label("owncloud"), "ownCloud");
         assert_eq!(kind_label("webdav"), "WebDAV");
         assert_eq!(kind_label("nextcloud"), "Nextcloud");
+        assert_eq!(kind_label("git"), "Git");
     }
 }

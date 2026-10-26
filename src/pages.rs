@@ -1072,6 +1072,8 @@ pub fn provider_body(
          <p class=\"hint\">For Nextcloud and ownCloud, the server root, with no path and no query. \
          For WebDAV, the files address itself. Write <code>{{user}}</code> where the server puts the login name, \
          as in <code>https://dav.example.com/files/{{user}}</code>. \
+         For Git, the repository, <code>https://github.com/owner/repo</code> or a Gitea/Forgejo host with the same path; \
+         people link it with a login name and a personal access token. \
          A test asks the server to answer before anybody depends on it.</p>\
          <label for=\"contacts\">Address books (WebDAV only, optional)</label>\
          <input id=\"contacts\" name=\"contacts\" type=\"url\" inputmode=\"url\" autocomplete=\"off\" spellcheck=\"false\" \

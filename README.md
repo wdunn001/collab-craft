@@ -157,8 +157,11 @@ That means this service holds the credential, as it does the Nextcloud one. Use
 a password the server lets you revoke on its own.
 
 `craft-nextcloud` implements the first two. `craft-webdav` implements the
-third over the same WebDAV and CardDAV code. Another kind is an implementation
-of six traits and one line in `state::provider_from`, with no change to any app.
+third over the same WebDAV and CardDAV code. Git is a fourth kind: files go
+through the GitHub or Gitea/Forgejo contents API for a named repository,
+linked with a login and a token. Sharing, mail and contacts are absent, the
+same way they are on plain WebDAV. Another kind is an implementation of six
+traits and one line in `state::provider_from`, with no change to any app.
 
 [RFC 4918]: https://www.rfc-editor.org/rfc/rfc4918
 

@@ -275,6 +275,7 @@ pub fn provider_from(config: &crate::settings::ProviderConfig, user: &str, passw
         "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
         "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
         "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp::default()))),
+        "git" => Some(Arc::new(crate::git::Git::new(&config.base, user, password))),
         _ => None,
     }
 }
