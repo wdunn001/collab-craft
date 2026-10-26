@@ -132,7 +132,10 @@ pub fn probe(base: &str) -> std::result::Result<(), String> {
         .header("User-Agent", "collabcraft")
         .send()
         .map_err(|e| e.to_string())?;
-    if response.status().as_u16() == 200 {
+    let code = response.status().as_u16();
+    // GitHub's root is public. Forgejo/Gitea often keep /api/v1/version
+    // behind sign-in; 401/403 still means the host speaks the contents API.
+    if code == 200 || code == 401 || code == 403 {
         return Ok(());
     }
     Err(format!("{url} answered HTTP {}", response.status()))
