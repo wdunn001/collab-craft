@@ -81,7 +81,7 @@ impl Git {
 
     fn contents_url(&self, path: &str) -> Result<String> {
         if self.owner.is_empty() || self.repo.is_empty() {
-            return Err(Error::Invalid { what: "repository".to_owned(), detail: "the address has to name owner/repo".to_owned() });
+            return Err(Error::Invalid { what: "repository", detail: "the address has to name owner/repo".to_owned() });
         }
         let rel = path.trim_matches('/');
         let encoded = if rel.is_empty() { String::new() } else { encode_path(rel) };
@@ -120,7 +120,7 @@ fn parse_repo(base: &str) -> Parsed {
 ///
 /// GitHub's API root and Forgejo/Gitea's `/api/v1/version` need no credential.
 /// A 200 means the host is there and speaks the contents API we use later.
-pub fn probe(base: &str) -> Result<(), String> {
+pub fn probe(base: &str) -> std::result::Result<(), String> {
     let parsed = parse_repo(base);
     let url = if parsed.api == "https://api.github.com" {
         "https://api.github.com/".to_owned()
