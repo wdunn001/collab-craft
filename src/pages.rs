@@ -1612,6 +1612,11 @@ pub fn provider_body(
                      placeholder=\"https://dav.example.com/addressbooks/{{user}}\" value=\"{}\">",
                     escape(contacts)
                 ));
+            } else if kind == "git" {
+                body.push_str(
+                    "<p class=\"hint\">The repository, <code>https://github.com/owner/repo</code> or a Gitea/Forgejo host with the same path. \
+                     People link it with a login name and a personal access token.</p>",
+                );
             } else {
                 body.push_str("<p class=\"hint\">The server root, with no path and no query.</p>");
             }

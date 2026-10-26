@@ -104,6 +104,16 @@ pub struct Me {
     /// The provider's conversation lobby, when it has one.
     #[serde(default)]
     pub conversation: Option<ConversationHome>,
+    /// Present when CollabCraft is storing files in a git repository.
+    #[serde(default)]
+    pub git: Option<GitView>,
+}
+
+/// Branch and remote as Open / Save should show them.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct GitView {
+    pub branch: String,
+    pub remote: String,
 }
 
 /// A relay token and where to take it.

@@ -128,6 +128,9 @@ pub struct Me {
     /// unsupported, so a launcher draws no Talk button rather than a dead one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<ConversationHome>,
+    /// Present when this deployment stores files in a git repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::git::GitView>,
 }
 
 pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
@@ -144,6 +147,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             service,
             provider_linked: false,
             conversation: None,
+            git: None,
         })
         .into_response();
     };
@@ -162,6 +166,11 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
     } else {
         None
     };
+    let git = if provider.id() == "git" {
+        app.provider_config().await.map(|(config, _)| crate::git::GitView { branch: "main".to_owned(), remote: config.base })
+    } else {
+        None
+    };
     let p = provider.clone();
     let identity = tokio::task::spawn_blocking(move || craft_cloud::Accounts::me(p.as_ref())).await;
     match identity {
@@ -175,6 +184,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             service,
             provider_linked: true,
             conversation,
+            git,
         })
         .into_response(),
         Ok(Err(e)) => fail(e),

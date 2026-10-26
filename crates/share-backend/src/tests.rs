@@ -58,6 +58,7 @@ fn me(email: Option<&str>, linked: bool) -> Me {
         capabilities: vec![Capability::Sharing],
         provider_linked: linked,
         conversation: None,
+        git: None,
     }
 }
 
