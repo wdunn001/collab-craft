@@ -892,7 +892,15 @@ mod web {
     }
 
     fn form(csrf: &str, kind: &str, base: &str, action: &str) -> ProviderForm {
-        ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), contacts: String::new(), action: action.to_owned() }
+        ProviderForm {
+            csrf: csrf.to_owned(),
+            kind: kind.to_owned(),
+            base: base.to_owned(),
+            contacts: String::new(),
+            action: action.to_owned(),
+            client_id: String::new(),
+            client_secret: String::new(),
+        }
     }
 
     // ---- entitlement a deployment can change without a redeploy -------------
@@ -908,6 +916,29 @@ mod web {
 
         let again = Permissions::parse(&typed.default_apps().join(", "), &typed.groups_text());
         assert_eq!(again, typed, "a save of what the page showed changes nothing");
+    }
+
+    #[test]
+    fn a_checkbox_save_keeps_a_grant_for_an_application_that_is_not_hosted() {
+        let mut saved = Permissions::from_checks(&["gridcraft".to_owned()], &["editors".to_owned()], &["0:wordcraft".to_owned()]);
+        let previous = Permissions::parse("gridcraft, missingcraft", "editors: wordcraft, alsomissing");
+        saved.keep_absent(&previous, &["gridcraft".to_owned(), "wordcraft".to_owned()]);
+        assert!(saved.default_apps().contains(&"missingcraft".to_owned()));
+        let editors = saved.group_apps().get("editors").expect("the group");
+        assert!(editors.contains(&"wordcraft".to_owned()));
+        assert!(editors.contains(&"alsomissing".to_owned()));
+    }
+
+    #[test]
+    fn the_apps_page_offers_a_box_per_hosted_application() {
+        let app = service(Permissions::decide("gridcraft", &[]), crate::settings::Settings::decide(None, None, None), &["gridcraft", "wordcraft"]);
+        let entitled = Permissions::decide("gridcraft", &[("editors", "wordcraft")]);
+        let body = pages::apps_body(&app, &signed_in(&["craft-admins"]), &entitled, Source::Stored, None, None);
+        assert!(body.contains("type=\"checkbox\" name=\"default\" value=\"gridcraft\" checked"));
+        assert!(body.contains("type=\"checkbox\" name=\"grant\" value=\"0:wordcraft\" checked"));
+        assert!(body.contains("name=\"group_name\""));
+        assert!(!body.contains("name=\"groups\""), "the comma textarea is gone");
+        assert!(!body.contains("<textarea"));
     }
 
     #[test]
@@ -1246,12 +1277,13 @@ mod web {
         let one = pages::card("gridcraft");
         assert!(one.contains("href=\"/gridcraft/\""));
         assert!(one.contains("GridCraft"), "a slug reads as the application's name");
+        assert!(one.contains("--app:#1f9d55"), "a known app uses the launcher's brand colour");
         assert_eq!(one, pages::card("gridcraft"), "the same application draws the same card every time");
         assert_ne!(pages::card("wordcraft"), one);
         // An application this binary has never heard of still gets a card.
         let unknown = pages::card("sheetworks");
         assert!(unknown.contains("Sheetworks"));
-        assert!(unknown.contains("--h:"));
+        assert!(unknown.contains("--app:hsl("), "an unknown app still gets a stable colour");
     }
 
     #[test]
@@ -1351,6 +1383,7 @@ mod provider_kinds {
         assert!(link("nextcloud"));
         assert!(!link("owncloud"));
         assert!(!link("webdav"));
+        assert!(!link("google"));
     }
 
     #[test]
@@ -1384,5 +1417,15 @@ mod provider_kinds {
         assert_eq!(kind_label("owncloud"), "ownCloud");
         assert_eq!(kind_label("webdav"), "WebDAV");
         assert_eq!(kind_label("nextcloud"), "Nextcloud");
+        assert_eq!(kind_label("google"), "Google Drive");
+    }
+
+    #[test]
+    fn a_connection_handle_round_trips_and_a_legacy_handle_does_not_split() {
+        let id = "ab".repeat(32);
+        let stamped = crate::route::stamp(&id, "file:with:colons");
+        assert_eq!(crate::route::split(&stamped), Some((id.as_str(), "file:with:colons")));
+        assert!(crate::route::split("/Documents/Budget.xlsx").is_none());
+        assert!(crate::route::split("cx:short:file").is_none());
     }
 }

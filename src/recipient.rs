@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::api::ApiError;
 use crate::keyed::{self, Key, Link, Refusal};
 // One escaper for every page this service renders. Two would be one too many.
-use crate::pages::escape;
+use crate::pages::{escape, layout};
 use crate::session::{GUEST_COOKIE, Guest, InviteSession, Session, random_id};
 use crate::state::App;
 
@@ -333,14 +333,7 @@ pub(crate) fn handoff(app_slug: &str, session_id: &str, base: &str) -> String {
 
 /// One refusal, as a page rather than JSON, because a person is reading it.
 fn page(message: &str) -> String {
-    format!(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <meta name=\"referrer\" content=\"no-referrer\">\
-         <title>This link does not work</title></head>\
-         <body><h1>This link does not work</h1><p>{}</p></body></html>\n",
-        escape(message)
-    )
+    layout("This link does not work", None, &format!("<h1>This link does not work</h1><p>{}</p>", escape(message)))
 }
 
 fn now_unix() -> i64 {

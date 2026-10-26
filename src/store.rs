@@ -29,6 +29,28 @@ pub struct ProviderLink {
     pub password: String,
 }
 
+/// One storage account a person connected, beyond the single legacy link.
+///
+/// The legacy link has no id and answers file handles that were issued before
+/// connections existed. A connection has an id, and every file handle it
+/// issues carries that id so a later call can find this account again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Connection {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub account: String,
+    pub user: String,
+    pub secret: String,
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
 #[derive(Clone)]
 pub struct Store {
     client: redis::Client,
@@ -121,6 +143,13 @@ pub struct LinkFlow {
     pub user: String,
     pub endpoint: String,
     pub token: String,
+    /// Set when this flow should become a connection rather than the legacy link.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub as_connection: bool,
 }
 
 /// How long an unfinished sign-in or link attempt is kept.
@@ -192,7 +221,14 @@ impl Store {
 
     pub async fn put_link_flow(&self, handle: &str, user: &str, endpoint: &str, token: &str) {
         let Some(mut c) = self.conn().await else { return };
-        let flow = LinkFlow { user: user.to_owned(), endpoint: endpoint.to_owned(), token: token.to_owned() };
+        let flow = LinkFlow {
+            user: user.to_owned(),
+            endpoint: endpoint.to_owned(),
+            token: token.to_owned(),
+            kind: String::new(),
+            base: String::new(),
+            as_connection: false,
+        };
         if let Ok(body) = serde_json::to_string(&flow) {
             let _ = c.set_ex::<_, _, ()>(self.link_flow_key(handle), body, PENDING_TTL_SECS).await;
         }
@@ -207,6 +243,13 @@ impl Store {
     pub async fn drop_link_flow(&self, handle: &str) {
         if let Some(mut c) = self.conn().await {
             let _ = c.del::<_, ()>(self.link_flow_key(handle)).await;
+        }
+    }
+
+    pub async fn put_link_flow_as(&self, handle: &str, flow: &LinkFlow) {
+        let Some(mut c) = self.conn().await else { return };
+        if let Ok(body) = serde_json::to_string(flow) {
+            let _ = c.set_ex::<_, _, ()>(self.link_flow_key(handle), body, PENDING_TTL_SECS).await;
         }
     }
 }
@@ -242,6 +285,101 @@ impl Store {
     pub async fn drop_provider_config(&self) -> bool {
         let Some(mut c) = self.conn().await else { return false };
         c.del::<_, ()>(self.provider_config_key()).await.is_ok()
+    }
+
+    fn offers_key(&self) -> String {
+        format!("{}:config:offers", self.prefix)
+    }
+
+    pub async fn offers(&self) -> Vec<crate::settings::Offer> {
+        let Some(mut c) = self.conn().await else { return Vec::new() };
+        let Ok(body) = c.get::<_, String>(self.offers_key()).await else { return Vec::new() };
+        serde_json::from_str(&body).unwrap_or_default()
+    }
+
+    /// Remember one allowed kind without dropping the others.
+    pub async fn upsert_offer(&self, offer: &crate::settings::Offer) -> bool {
+        let mut offers = self.offers().await;
+        if let Some(existing) = offers.iter_mut().find(|o| o.kind == offer.kind && o.base == offer.base) {
+            *existing = offer.clone();
+        } else {
+            offers.push(offer.clone());
+        }
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(&offers) else { return false };
+        c.set::<_, _, ()>(self.offers_key(), body).await.is_ok()
+    }
+
+    fn google_secret_key(&self) -> String {
+        format!("{}:config:google_secret", self.prefix)
+    }
+
+    /// The OAuth client secret, if an administrator typed one.
+    ///
+    /// Absent when the deployment uses `COLLABCRAFT_GOOGLE_CLIENT_SECRET` instead.
+    pub async fn google_secret(&self) -> Option<String> {
+        if let Some(from_env) = std::env::var("COLLABCRAFT_GOOGLE_CLIENT_SECRET").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
+            return Some(from_env);
+        }
+        let mut c = self.conn().await?;
+        c.get(self.google_secret_key()).await.ok()
+    }
+
+    pub async fn put_google_secret(&self, secret: &str) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        c.set::<_, _, ()>(self.google_secret_key(), secret).await.is_ok()
+    }
+
+    fn connections_key(&self, user: &str) -> String {
+        format!("{}:connections:{user}", self.prefix)
+    }
+
+    pub async fn connections(&self, user: &str) -> Vec<Connection> {
+        let Some(mut c) = self.conn().await else { return Vec::new() };
+        let Ok(body) = c.get::<_, String>(self.connections_key(user)).await else { return Vec::new() };
+        serde_json::from_str(&body).unwrap_or_default()
+    }
+
+    async fn write_connections(&self, user: &str, connections: &[Connection]) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(connections) else { return false };
+        c.set_ex::<_, _, ()>(self.connections_key(user), body, LINK_TTL_SECS).await.is_ok()
+    }
+
+    pub async fn put_connection(&self, user: &str, connection: Connection) -> bool {
+        let mut connections = self.connections(user).await;
+        if connection.default {
+            for other in &mut connections {
+                other.default = false;
+            }
+        }
+        if let Some(existing) = connections.iter_mut().find(|c| c.id == connection.id) {
+            *existing = connection;
+        } else {
+            connections.push(connection);
+        }
+        self.write_connections(user, &connections).await
+    }
+
+    pub async fn drop_connection(&self, user: &str, id: &str) -> bool {
+        let mut connections = self.connections(user).await;
+        let before = connections.len();
+        connections.retain(|c| c.id != id);
+        if connections.len() == before {
+            return true;
+        }
+        self.write_connections(user, &connections).await
+    }
+
+    pub async fn default_connection(&self, user: &str, id: &str) -> bool {
+        let mut connections = self.connections(user).await;
+        if !connections.iter().any(|c| c.id == id) {
+            return false;
+        }
+        for connection in &mut connections {
+            connection.default = connection.id == id;
+        }
+        self.write_connections(user, &connections).await
     }
 
     fn entitlements_key(&self) -> String {
