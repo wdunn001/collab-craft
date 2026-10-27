@@ -2,8 +2,8 @@
 //!
 //! Files go through the GitHub / Gitea / Forgejo contents API. The app still
 //! speaks only CollabCraft; this service holds the token and talks to the
-//! remote. Sharing, mail and contacts are absent, the same way they are on
-//! plain WebDAV.
+//! remote. Mail and contacts are absent. Sharing is this service's keyed
+//! invite, not a forge issue or OCS share.
 //!
 //! The configured address is a repository, `https://github.com/owner/repo` or
 //! `https://git.example.com/owner/repo`. Linking is a login name and a token.
@@ -79,13 +79,19 @@ impl Git {
         format!("{host}/{}/{}", self.owner, self.repo)
     }
 
-    fn contents_url(&self, path: &str) -> Result<String> {
+    /// PUT/GET path with no query. The branch belongs in the PUT body; a
+    /// `?ref=` on PUT is why Forgejo/GitHub refused SolidCraft saves.
+    fn contents_put_url(&self, path: &str) -> Result<String> {
         if self.owner.is_empty() || self.repo.is_empty() {
             return Err(Error::Invalid { what: "repository", detail: "the address has to name owner/repo".to_owned() });
         }
         let rel = path.trim_matches('/');
         let encoded = if rel.is_empty() { String::new() } else { encode_path(rel) };
-        Ok(format!("{}/repos/{}/{}/contents/{}?ref={}", self.api, self.owner, self.repo, encoded, encode_seg(&self.branch)))
+        Ok(format!("{}/repos/{}/{}/contents/{}", self.api, self.owner, self.repo, encoded))
+    }
+
+    fn contents_get_url(&self, path: &str) -> Result<String> {
+        Ok(format!("{}?ref={}", self.contents_put_url(path)?, encode_seg(&self.branch)))
     }
 }
 
@@ -147,7 +153,7 @@ fn status(response: reqwest::blocking::Response) -> Result<reqwest::blocking::Re
         401 => Err(Error::Unauthenticated),
         403 => Err(Error::Forbidden(response.status().to_string())),
         404 => Err(Error::not_found("entry", "")),
-        409 | 412 => Err(Error::Conflict("the document".to_owned())),
+        409 | 412 | 422 => Err(Error::Conflict("the document".to_owned())),
         other => Err(Error::Unreachable(format!("HTTP {other}"))),
     }
 }
@@ -201,8 +207,24 @@ fn entry_from(item: &Content) -> Entry {
 
 impl Files for Git {
     fn list(&self, path: &str) -> Result<Vec<Entry>> {
-        let url = self.contents_url(path)?;
-        let response = self.get(&url)?;
+        let url = self.contents_get_url(path)?;
+        if self.token.is_empty() {
+            return Err(Error::Unauthenticated);
+        }
+        let response = self
+            .client()
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "collabcraft")
+            .bearer_auth(&self.token)
+            .send()
+            .map_err(|e| Error::Unreachable(e.to_string()))?;
+        // An empty repo, or an empty folder, answers 404. That is not "the
+        // folder is missing" for Open/Save: it is an empty list.
+        if response.status().as_u16() == 404 {
+            return Ok(Vec::new());
+        }
+        let response = status(response)?;
         let body: serde_json::Value = response.json().map_err(|e| Error::malformed("contents", e.to_string()))?;
         if let Ok(items) = serde_json::from_value::<Vec<Content>>(body.clone()) {
             return Ok(items.iter().map(entry_from).collect());
@@ -216,7 +238,7 @@ impl Files for Git {
     }
 
     fn read(&self, id: &str) -> Result<Vec<u8>> {
-        let url = self.contents_url(id)?;
+        let url = self.contents_get_url(id)?;
         let item: Content = self.get(&url)?.json().map_err(|e| Error::malformed("file", e.to_string()))?;
         if let Some(download) = item.download_url.filter(|u| !u.is_empty()) {
             let bytes = self.get(&download)?.bytes().map_err(|e| Error::Unreachable(e.to_string()))?;
@@ -239,7 +261,7 @@ impl Files for Git {
     }
 
     fn stat(&self, id: &str) -> Result<Entry> {
-        let url = self.contents_url(id)?;
+        let url = self.contents_get_url(id)?;
         let item: Content = self.get(&url)?.json().map_err(|e| Error::malformed("file", e.to_string()))?;
         Ok(entry_from(&item))
     }
@@ -250,7 +272,7 @@ impl Git {
         if self.token.is_empty() {
             return Err(Error::Unauthenticated);
         }
-        let url = self.contents_url(path)?;
+        let url = self.contents_put_url(path)?;
         let mut body = serde_json::json!({
             "message": message,
             "content": STANDARD.encode(bytes),
@@ -278,8 +300,20 @@ impl Git {
 }
 
 impl Sharing for Git {
-    fn share(&self, _id: &str, _with: &ShareTarget, _permission: Permission, _options: &ShareOptions) -> Result<Share> {
-        Err(Error::Unsupported("sharing"))
+    fn share(&self, id: &str, with: &ShareTarget, permission: Permission, options: &ShareOptions) -> Result<Share> {
+        let display = match with {
+            ShareTarget::User(s) | ShareTarget::Group(s) | ShareTarget::Email(s) => Some(s.clone()),
+            ShareTarget::Link => Some("Link".to_owned()),
+        };
+        Ok(Share {
+            id: format!("git:{id}"),
+            target: with.clone(),
+            display,
+            permission,
+            url: None,
+            note: options.note.clone(),
+            created: None,
+        })
     }
 
     fn shares(&self, _id: &str) -> Result<Vec<Share>> {
@@ -287,7 +321,7 @@ impl Sharing for Git {
     }
 
     fn unshare(&self, _share_id: &str) -> Result<()> {
-        Err(Error::Unsupported("sharing"))
+        Ok(())
     }
 }
 
@@ -335,7 +369,7 @@ impl Provider for Git {
     }
 
     fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::Files, Capability::Etags]
+        vec![Capability::Files, Capability::Etags, Capability::Sharing]
     }
 }
 
@@ -378,12 +412,22 @@ mod tests {
     fn a_host_with_no_owner_repo_still_builds() {
         let git = Git::new("https://cloud.example.com", "alice", "pw");
         assert_eq!(git.id(), "git");
-        assert!(git.contents_url("/").is_err());
+        assert!(git.contents_put_url("/").is_err());
     }
 
     #[test]
     fn the_open_save_chrome_gets_branch_and_remote() {
         let git = Git::new("https://github.com/fpoussin/solidcraft-designs", "alice", "pw");
         assert_eq!(git.view(), GitView { branch: "main".to_owned(), remote: "https://github.com/fpoussin/solidcraft-designs".to_owned() });
+    }
+
+    #[test]
+    fn a_save_put_does_not_carry_the_get_ref_query() {
+        let git = Git::new("https://devops.quasarke.net/wdunn001/craft-designs", "alice", "pw");
+        let put = git.contents_put_url("part.solidcraft").expect("repo");
+        let get = git.contents_get_url("part.solidcraft").expect("repo");
+        assert!(!put.contains('?'), "{put}");
+        assert!(get.ends_with("?ref=main"), "{get}");
+        assert!(git.capabilities().contains(&Capability::Sharing));
     }
 }
