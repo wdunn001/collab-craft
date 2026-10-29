@@ -157,10 +157,9 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
     // conversation(); this is only for the launcher / CollabCraft home.
     let conversation = if capabilities.contains(&craft_cloud::Capability::Conversation) {
         match craft_cloud::Conversations::conversation_name(provider.as_ref()) {
-            Some(name) => app.provider_config().await.map(|(cfg, _)| ConversationHome {
-                name,
-                url: format!("{}/apps/spreed", cfg.base.trim_end_matches('/')),
-            }),
+            Some(name) => {
+                app.provider_config().await.map(|(cfg, _)| ConversationHome { name, url: format!("{}/apps/spreed", cfg.base.trim_end_matches('/')) })
+            }
             None => None,
         }
     } else {

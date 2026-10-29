@@ -5,7 +5,7 @@
 //! the environment or the bus. This type holds a refresh token for one user.
 
 use craft_cloud::{
-    Accounts, Capability, Contact, Contacts, Conversations, Entry, EntryKind, Error, Files, Identity, Mail, MailMessage, Notifications, Notification,
+    Accounts, Capability, Contact, Contacts, Conversations, Entry, EntryKind, Error, Files, Identity, Mail, MailMessage, Notification, Notifications,
     Permission, Provider, Result, Share, ShareOptions, ShareTarget, Sharing,
 };
 use serde::Deserialize;
@@ -151,7 +151,11 @@ impl Files for Drive {
     fn create(&self, folder: &str, name: &str, bytes: &[u8]) -> Result<Entry> {
         let token = self.token()?;
         let parent = if folder.is_empty() || folder == "/" { "root".to_owned() } else { folder.to_owned() };
-        let meta = format!("{{\"name\":{},\"parents\":[{}]}}", serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_owned()), serde_json::to_string(&parent).unwrap_or_else(|_| "\"root\"".to_owned()));
+        let meta = format!(
+            "{{\"name\":{},\"parents\":[{}]}}",
+            serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_owned()),
+            serde_json::to_string(&parent).unwrap_or_else(|_| "\"root\"".to_owned())
+        );
         let boundary = "collabcraft";
         let mut body = Vec::new();
         body.extend(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{meta}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes());
