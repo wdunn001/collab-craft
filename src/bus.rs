@@ -4,6 +4,10 @@
 //! Nextcloud itself uses for its distributed cache and file locking, so the
 //! relay rides the same instance.
 //!
+//! These two make the relay safe to run beside another instance. Fan-out does not: an ordered
+//! edit reaches the room through the in-process Socket.IO adapter, so a document is served by
+//! exactly one relay. The README says so under "One relay per document".
+//!
 //! Two things live here that cannot live in relay memory:
 //!
 //! * **The sequence.** `INCR` is atomic, so two relay instances cannot hand out

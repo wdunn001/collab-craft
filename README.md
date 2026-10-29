@@ -234,6 +234,31 @@ A 16 MB bundle becomes about 5 MB.
 
 Leave the directory empty to run as an API and relay only.
 
+## One relay per document
+
+A document is served by exactly one relay process. Nothing enforces that, and
+getting it wrong is quiet rather than loud, so it belongs in front of the
+deployment notes.
+
+The shared Valkey makes two pieces safe across instances. `INCR` means two
+relays cannot hand out the same sequence number, and `SET NX` means two cannot
+grant the same scope lock. Fan-out is not one of those pieces. An ordered edit
+reaches the room through the Socket.IO in-process adapter, so a second instance
+serving the same document would take sequence numbers from the shared counter
+and deliver only its own half of them. Every client on both sides would sit on a
+permanent gap in the sequence, ask for a resync, and be told to reopen the file.
+
+Run one relay, or route a document to a fixed instance. A load balancer in front
+of several relays needs session affinity on the document, not on the client.
+
+Carrying edits between instances needs a Socket.IO adapter with a broker behind
+it, which is a real change rather than a configuration flag: the adapter has to
+be installed on the builder before `io.ns`, every broadcast path has to become
+fallible and awaited, and the result has to be tested against two relays and a
+Valkey together. `socketioxide-redis` was a declared dependency that nothing
+used, which read as though this already worked. It is gone until the work is
+done.
+
 ## How an edit travels
 
 The API asks the provider whether this user may open this document, signs a
