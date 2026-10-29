@@ -656,10 +656,11 @@ async fn on_resync(socket: SocketRef, Data(msg): Data<ResyncMsg>, State(relay): 
 /// point: a caller that signs its own frames and chains each to the previous hash keeps both
 /// properties end to end, and a relay that re-read or re-ordered them would break the chain.
 /// Not echoed to the sender, which already has it.
-async fn on_frame(socket: SocketRef, Data(msg): Data<FrameMsg>, State(relay): State<Arc<Relay>>) {
+async fn on_frame(socket: SocketRef, Data(msg): Data<FrameMsg>) {
+    // No relay state: a frame is neither sequenced nor stored, so there is nothing to reach
+    // for. Every other handler takes it, and taking it here would suggest otherwise.
     let Some(claims) = socket.extensions.get::<Claims>() else { return };
     let room_name = claims.room();
-    let _ = &relay;
 
     if !claims.may_edit() {
         let _ = socket.emit("error", &ErrorMsg { doc: room_name, detail: Refusal::ReadOnly.detail() });
