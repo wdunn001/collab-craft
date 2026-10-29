@@ -307,8 +307,13 @@ impl Room {
         let Some(scope) = op.params.get("scope").and_then(serde_json::Value::as_str) else {
             return;
         };
-        let Some(ops) = op.params.get("ops") else { return };
-        let bytes = value_bytes(ops);
+        // Flattened, one entry per operation. A payload carries a batch, and keeping the
+        // batches nested would hand a joining peer an array of arrays that cannot decode as
+        // the operation list it expects.
+        let Some(ops) = op.params.get("ops").and_then(serde_json::Value::as_array) else {
+            return;
+        };
+        let bytes: usize = ops.iter().map(value_bytes).sum();
         let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), bytes: 0, complete: true });
         if log.bytes + bytes > TEXT_BYTES {
             // Dropping the oldest would leave a replay that cannot be applied, because later
@@ -319,7 +324,7 @@ impl Room {
             log.bytes = 0;
             return;
         }
-        log.ops.push(ops.clone());
+        log.ops.extend(ops.iter().cloned());
         log.bytes += bytes;
     }
 

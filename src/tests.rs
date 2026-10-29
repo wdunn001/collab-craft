@@ -212,6 +212,40 @@ fn a_scope_past_its_budget_is_reported_incomplete() {
     assert!(log.ops().is_empty(), "a partial replay is worse than none, and is not offered");
 }
 
+/// The replay a joining peer receives has to decode as the operation list a client expects.
+/// Keeping each submit's batch nested handed it an array of arrays, and the client answered by
+/// declaring the scope unrecoverable. This drives the whole round trip: two submits in, the
+/// join payload out, and a real `craft_collab::Texts` applying it.
+#[test]
+fn a_replay_rebuilds_the_text_on_a_joining_replica() {
+    use craft_collab::Texts;
+
+    // Alice seeds "base" from the file and types " and more" in two bursts.
+    let mut alice = Texts::in_space(7);
+    alice.seed("/body/0", "base");
+    let first = alice.local_insert("/body/0", 4, " and").expect("seeded and in a space");
+    let second = alice.local_insert("/body/0", 8, " more").expect("seeded and in a space");
+    assert_eq!(alice.render("/body/0").as_deref(), Some("base and more"));
+
+    // Each burst reaches the relay as its own submit.
+    let mut r = room_with(&[("alice", true)]);
+    for (seq, ops) in [(1u64, &first), (2, &second)] {
+        let params = json!({ "scope": "/body/0", "ops": serde_json::to_value(ops).expect("ops encode") });
+        r.submit(seq, sub("alice", true, "crdt.text", params, None)).expect("ok");
+    }
+
+    // Bob joins. He gets the retained operations and the same file.
+    let log = r.texts().get("/body/0").expect("retained");
+    assert!(log.complete());
+    let replay: Vec<craft_crdt::text::TextOp> =
+        serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("the replay decodes as an operation list");
+
+    let mut bob = Texts::in_space(9);
+    assert_eq!(bob.apply("/body/0", &replay), None, "held until the file arrives");
+    assert_eq!(bob.seed("/body/0", "base"), "base and more");
+    assert_eq!(bob.render("/body/0"), alice.render("/body/0"));
+}
+
 /// Latest wins, and the newest value per kind is what a joining peer is handed.
 #[test]
 fn ephemeral_state_keeps_only_the_newest_value_per_kind() {

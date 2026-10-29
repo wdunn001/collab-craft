@@ -103,3 +103,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The relay binary does not link these. Its tests do: the join-replay test drives a real
+# `craft_collab::Texts` against the operations `Room` retained, so the round trip is checked
+# against the client that has to decode it rather than against an assumption about the shape.
+[dev-dependencies]
+craft-collab = { workspace = true }
+craft-crdt = { workspace = true }
