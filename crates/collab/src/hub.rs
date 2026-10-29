@@ -42,7 +42,8 @@ pub trait Hub {
 /// Listed explicitly because a Socket.IO client registers one callback per event name, so a hub
 /// has to know the whole set before anything arrives. An event missing from here is an event
 /// nobody is listening for, which looks like a relay that connects and then says nothing.
-pub const EVENTS: [&str; 8] = ["joined", "op", "lock_granted", "lock_denied", "lock_released", "presence", "snapshot", "error"];
+pub const EVENTS: [&str; 11] =
+    ["joined", "op", "lock_granted", "lock_denied", "lock_released", "presence", "snapshot", "text_ops", "frame", "ephemeral", "error"];
 
 /// Encode a client message as the JSON a Socket.IO event carries.
 pub fn encode(msg: &ClientMsg) -> Result<String> {
@@ -68,6 +69,8 @@ pub fn emit(msg: &ClientMsg) -> (&'static str, serde_json::Value) {
         ClientMsg::Lock { scope, .. } => ("lock", serde_json::json!({ "scope": scope })),
         ClientMsg::Unlock { scope, .. } => ("unlock", serde_json::json!({ "scope": scope })),
         ClientMsg::Resync { have, .. } => ("resync", serde_json::json!({ "have": have })),
+        ClientMsg::Frame { payload, .. } => ("frame", serde_json::json!({ "payload": payload })),
+        ClientMsg::Ephemeral { kind, payload, .. } => ("ephemeral", serde_json::json!({ "kind": kind, "payload": payload })),
     }
 }
 

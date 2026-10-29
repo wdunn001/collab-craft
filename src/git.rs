@@ -31,6 +31,13 @@ pub struct Git {
     user: String,
     token: String,
     branch: String,
+    /// One client for every call this provider makes.
+    ///
+    /// A client per request built its own connection pool and its own TLS configuration each
+    /// time, so nothing was ever reused. It also carried no timeout, where every other outbound
+    /// client here has one, and a forge that accepted a connection and then said nothing would
+    /// hold a blocking thread with nothing to release it.
+    http: reqwest::blocking::Client,
 }
 
 impl Git {
@@ -44,11 +51,12 @@ impl Git {
             user: user.to_owned(),
             token: password.to_owned(),
             branch: "main".to_owned(),
+            http: http_client(),
         }
     }
 
-    fn client(&self) -> reqwest::blocking::Client {
-        reqwest::blocking::Client::new()
+    fn client(&self) -> &reqwest::blocking::Client {
+        &self.http
     }
 
     fn get(&self, url: &str) -> Result<reqwest::blocking::Response> {
@@ -103,6 +111,15 @@ struct Parsed {
     repo: String,
 }
 
+/// The outbound client every git call shares.
+///
+/// The same twenty seconds the service's other HTTP client uses. `unwrap_or_default` keeps a
+/// builder failure from being fatal, at the cost of the timeout, which is strictly better than
+/// refusing to construct a provider.
+fn http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap_or_default()
+}
+
 fn parse_repo(base: &str) -> Parsed {
     let trimmed = base.trim().trim_end_matches('/');
     let rest = trimmed.strip_prefix("https://").or_else(|| trimmed.strip_prefix("http://")).unwrap_or(trimmed);
@@ -128,16 +145,8 @@ fn parse_repo(base: &str) -> Parsed {
 /// A 200 means the host is there and speaks the contents API we use later.
 pub fn probe(base: &str) -> std::result::Result<(), String> {
     let parsed = parse_repo(base);
-    let url = if parsed.api == "https://api.github.com" {
-        "https://api.github.com/".to_owned()
-    } else {
-        format!("{}/version", parsed.api)
-    };
-    let response = reqwest::blocking::Client::new()
-        .get(&url)
-        .header("User-Agent", "collabcraft")
-        .send()
-        .map_err(|e| e.to_string())?;
+    let url = if parsed.api == "https://api.github.com" { "https://api.github.com/".to_owned() } else { format!("{}/version", parsed.api) };
+    let response = http_client().get(&url).header("User-Agent", "collabcraft").send().map_err(|e| e.to_string())?;
     let code = response.status().as_u16();
     // GitHub's root is public. Forgejo/Gitea often keep /api/v1/version
     // behind sign-in; 401/403 still means the host speaks the contents API.
@@ -305,15 +314,7 @@ impl Sharing for Git {
             ShareTarget::User(s) | ShareTarget::Group(s) | ShareTarget::Email(s) => Some(s.clone()),
             ShareTarget::Link => Some("Link".to_owned()),
         };
-        Ok(Share {
-            id: format!("git:{id}"),
-            target: with.clone(),
-            display,
-            permission,
-            url: None,
-            note: options.note.clone(),
-            created: None,
-        })
+        Ok(Share { id: format!("git:{id}"), target: with.clone(), display, permission, url: None, note: options.note.clone(), created: None })
     }
 
     fn shares(&self, _id: &str) -> Result<Vec<Share>> {
@@ -345,11 +346,7 @@ impl Mail for Git {
 
 impl Accounts for Git {
     fn me(&self) -> Result<Identity> {
-        let url = if self.api == "https://api.github.com" {
-            "https://api.github.com/user".to_owned()
-        } else {
-            format!("{}/user", self.api)
-        };
+        let url = if self.api == "https://api.github.com" { "https://api.github.com/user".to_owned() } else { format!("{}/user", self.api) };
         let body: UserInfo = self.get(&url)?.json().map_err(|e| Error::malformed("account", e.to_string()))?;
         let login = if body.login.is_empty() { self.user.clone() } else { body.login };
         Ok(Identity {

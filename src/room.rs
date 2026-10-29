@@ -18,6 +18,32 @@ use serde::Serialize;
 /// an unbounded log is a memory leak with a document-shaped trigger.
 pub const HISTORY: usize = 2048;
 
+/// Bytes of op parameters one document may retain.
+///
+/// [`HISTORY`] bounds the op count and says nothing about size. A client can put as much JSON
+/// in one `params` as the transport will carry, so counting ops alone let one authenticated
+/// editor hold an arbitrary multiple of the intended memory per room.
+pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Peers one document may hold at once.
+///
+/// The value `craft_crdt::Limits` carries. A room is a fan-out set and a roster broadcast, so
+/// an unbounded one is quadratic work per join.
+pub const MAX_PEERS: usize = 256;
+
+/// Bytes of retained CRDT operations per scope.
+///
+/// These are what a joining peer is replayed, so they are kept apart from the op history and
+/// outlive eviction from it. Past this the scope is marked incomplete, and a joiner is told
+/// rather than left believing the file plus the replay is the whole text.
+pub const TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Latest-wins values one peer may hold at once.
+///
+/// A camera and a selection are two kinds. An unbounded set would let one peer grow the room
+/// by inventing kind names.
+pub const MAX_EPHEMERAL_KINDS: usize = 16;
+
 /// One ordered edit, as the relay recorded it.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Op {
@@ -53,13 +79,17 @@ pub struct Submission {
     pub local: Option<u64>,
 }
 
-/// Why a submit or a lock was refused.
+/// Why a submit, a lock or a join was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The peer holds read only.
     ReadOnly,
     /// Another peer holds the scope.
     Locked { holder: String },
+    /// The document already holds [`MAX_PEERS`].
+    Full,
+    /// The message is larger than a document may retain.
+    TooLarge { bytes: usize },
 }
 
 impl Refusal {
@@ -67,7 +97,31 @@ impl Refusal {
         match self {
             Refusal::ReadOnly => "read-only access to this file".to_owned(),
             Refusal::Locked { holder } => format!("{holder} is editing that region"),
+            Refusal::Full => format!("this document already has {MAX_PEERS} editors"),
+            Refusal::TooLarge { bytes } => format!("that change is {bytes} bytes, more than this relay will carry"),
         }
+    }
+}
+
+/// Retained CRDT operations for one scope.
+#[derive(Default)]
+pub struct TextLog {
+    /// The operations, oldest first, as the clients sent them.
+    ops: Vec<serde_json::Value>,
+    bytes: usize,
+    /// Whether everything since the file was opened is still here.
+    complete: bool,
+}
+
+impl TextLog {
+    /// The operations to replay to a joining peer.
+    pub fn ops(&self) -> &[serde_json::Value] {
+        &self.ops
+    }
+
+    /// Whether the text can be rebuilt from the file plus [`TextLog::ops`].
+    pub fn complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -95,6 +149,12 @@ pub struct Room {
     peers: Vec<Peer>,
     /// scope -> holder.
     locks: HashMap<String, String>,
+    /// Bytes of `params` currently held in [`Room::history`].
+    history_bytes: usize,
+    /// scope -> the CRDT operations a joining peer needs.
+    texts: HashMap<String, TextLog>,
+    /// peer -> kind -> the newest value that peer sent.
+    ephemeral: HashMap<String, HashMap<String, serde_json::Value>>,
 }
 
 impl Room {
@@ -124,9 +184,52 @@ impl Room {
     /// Replacing rather than rejecting matters on a reconnect: the old socket
     /// may not have been reaped yet, and refusing the new one would lock the
     /// user out of their own document until a timeout.
-    pub fn join(&mut self, peer: Peer) {
+    pub fn join(&mut self, peer: Peer) -> Result<(), Refusal> {
+        let replacing = self.peers.iter().any(|p| p.peer == peer.peer);
+        if !replacing && self.peers.len() >= MAX_PEERS {
+            return Err(Refusal::Full);
+        }
         self.peers.retain(|p| p.peer != peer.peer);
         self.peers.push(peer);
+        Ok(())
+    }
+
+    /// The CRDT operations a joining peer needs, per scope.
+    pub fn texts(&self) -> &HashMap<String, TextLog> {
+        &self.texts
+    }
+
+    /// Every peer's newest latest-wins values, for a joining peer.
+    ///
+    /// Flattened to `(peer, kind, value)` so a caller emits one message each without walking
+    /// two maps.
+    pub fn ephemeral(&self) -> Vec<(String, String, serde_json::Value)> {
+        let mut out: Vec<(String, String, serde_json::Value)> = self
+            .ephemeral
+            .iter()
+            .flat_map(|(peer, kinds)| kinds.iter().map(move |(kind, value)| (peer.clone(), kind.clone(), value.clone())))
+            .collect();
+        // Sorted so a join payload does not depend on hash order, which makes it testable.
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        out
+    }
+
+    /// Record one peer's newest value for one kind.
+    ///
+    /// Latest wins, so the previous value is simply replaced. A peer past
+    /// [`MAX_EPHEMERAL_KINDS`] is refused, because kind names are the peer's own and an
+    /// unbounded set is a way to grow the room.
+    pub fn remember_ephemeral(&mut self, peer_id: &str, kind: &str, value: serde_json::Value) -> Result<(), Refusal> {
+        let bytes = value_bytes(&value);
+        if bytes > TEXT_BYTES {
+            return Err(Refusal::TooLarge { bytes });
+        }
+        let kinds = self.ephemeral.entry(peer_id.to_owned()).or_default();
+        if !kinds.contains_key(kind) && kinds.len() >= MAX_EPHEMERAL_KINDS {
+            return Err(Refusal::TooLarge { bytes });
+        }
+        kinds.insert(kind.to_owned(), value);
+        Ok(())
     }
 
     /// Remove a peer and drop every scope it held.
@@ -135,6 +238,9 @@ impl Room {
     /// lock that outlived its holder would wedge the region until a restart.
     pub fn leave(&mut self, peer_id: &str) -> Vec<String> {
         self.peers.retain(|p| p.peer != peer_id);
+        // Their camera and selection go with them. A marker left behind would show somebody
+        // looking at a part they are no longer in.
+        self.ephemeral.remove(peer_id);
         let dropped: Vec<String> = self.locks.iter().filter(|(_, holder)| holder.as_str() == peer_id).map(|(scope, _)| scope.clone()).collect();
         for scope in &dropped {
             self.locks.remove(scope);
@@ -156,6 +262,10 @@ impl Room {
         if !s.may_edit {
             return Err(Refusal::ReadOnly);
         }
+        let bytes = value_bytes(&s.params);
+        if bytes > HISTORY_BYTES {
+            return Err(Refusal::TooLarge { bytes });
+        }
         let scope = if is_crdt_command(&s.command) { None } else { s.scope };
         if let Some(scope) = &scope
             && let Some(holder) = self.locks.get(scope)
@@ -167,16 +277,50 @@ impl Room {
         self.seq = self.seq.max(seq);
         let op = Op { seq, origin: s.peer_id, local: s.local, command: s.command, params: s.params, scope };
 
+        self.retain_text(&op);
+
         self.history.push(op.clone());
-        if self.first_in_history == 0 {
-            self.first_in_history = op.seq;
+        self.history_bytes += bytes;
+        // Both bounds, because either alone leaves the other unbounded: many tiny ops fill the
+        // count, and one large op fills the budget.
+        while self.history.len() > HISTORY || (self.history_bytes > HISTORY_BYTES && self.history.len() > 1) {
+            let gone = self.history.remove(0);
+            self.history_bytes = self.history_bytes.saturating_sub(value_bytes(&gone.params));
         }
-        if self.history.len() > HISTORY {
-            self.history.remove(0);
-            self.first_in_history += 1;
-        }
+        // Read from the log itself. Incrementing a mirror assumed the local history was
+        // contiguous, and two submits racing for the room lock push out of sequence order.
+        self.first_in_history = self.history.first().map_or(0, |op| op.seq);
 
         Ok(op)
+    }
+
+    /// Keep a CRDT operation for a peer that has not joined yet.
+    ///
+    /// The op history exists to fill a gap in the sequence and is evicted by age. These are
+    /// what a joining peer is replayed, so they are kept per scope and survive that eviction.
+    /// A scope past [`TEXT_BYTES`] is marked incomplete, which is what lets a joiner be told
+    /// the text cannot be rebuilt instead of being handed a partial replay.
+    fn retain_text(&mut self, op: &Op) {
+        if !is_crdt_command(&op.command) {
+            return;
+        }
+        let Some(scope) = op.params.get("scope").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(ops) = op.params.get("ops") else { return };
+        let bytes = value_bytes(ops);
+        let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), bytes: 0, complete: true });
+        if log.bytes + bytes > TEXT_BYTES {
+            // Dropping the oldest would leave a replay that cannot be applied, because later
+            // operations anchor on characters the dropped ones created. Saying so is the only
+            // honest answer.
+            log.complete = false;
+            log.ops.clear();
+            log.bytes = 0;
+            return;
+        }
+        log.ops.push(ops.clone());
+        log.bytes += bytes;
     }
 
     /// Record a grant the bus already made.
@@ -223,4 +367,13 @@ impl Room {
         }
         Some(self.history.iter().filter(|op| op.seq > have).cloned().collect())
     }
+}
+
+/// How many bytes a JSON value costs to hold.
+///
+/// Measured by encoding it. A structural estimate would be cheaper and would also be the
+/// number an attacker optimises against, and a submit already pays one serialisation to reach
+/// the socket.
+fn value_bytes(value: &serde_json::Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |v| v.len())
 }

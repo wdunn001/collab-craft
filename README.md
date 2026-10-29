@@ -242,10 +242,42 @@ that signature locally and never calls back. Authorisation costs one round trip
 per document, not one per keystroke.
 
 Each edit gets a sequence number from the bus and is fanned out in that order.
-Concurrent work in different regions proceeds freely; concurrent work in the
-same region is serialised by a scope lock. That is deliberately short of a
-CRDT. A CRDT would need stable identity for positions and a rewrite of each
-app's document model.
+Concurrent work in different regions proceeds freely. Concurrent work in the
+same region is serialised by a scope lock.
+
+Text is the exception, because a lock on a paragraph serialises exactly what two
+people writing in it want merged. Commands named `crdt.*` carry per-scope RGA
+operations from `craft-crdt`, and the relay strips any scope from them. Two
+people type in one paragraph and both insertions survive, with no lock and no
+authority deciding between them. Structured commands that do not commute, such
+as a boolean or a render, still take a lock.
+
+Two rules keep the character identities honest. Every scope allocates from its
+own counters, so the ids a paragraph receives cannot move when another paragraph
+is loaded first. The relay grants each connection its own id space in the join
+payload, and a client mints nothing before that arrives.
+
+A peer joining a live session cannot reach the room's text by reading the file,
+because the file is behind every edit made since it was written. The relay
+replays the `crdt.*` operations it still holds, per scope, outside the sequence.
+The peer loads the file and the replay lands on top, in either order. A scope the
+relay could not keep whole is reported as incomplete rather than left to look
+current.
+
+## Pass-through and ephemeral messages
+
+Two message kinds carry nothing the relay reads.
+
+A **frame** is opaque bytes. No sequence, no history, no decoding, so a caller
+that signs and orders its own traffic keeps both properties end to end. It needs
+edit permission.
+
+An **ephemeral** message is latest-wins state about one peer, such as a camera, a
+selection or a caret. The relay keeps only the newest value per peer and kind,
+and hands those to a joining peer so somebody arriving late sees where everyone
+is without waiting for them to move. It needs no edit permission, because
+somebody watching a design should still be able to say where they are looking.
+Nothing ephemeral is ordered, replayed or journaled.
 
 ## Licence
 

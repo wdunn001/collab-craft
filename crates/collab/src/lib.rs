@@ -63,7 +63,7 @@ pub mod web;
 #[cfg(test)]
 mod tests;
 
-pub use crdt::{TextPayload, Texts, char_pos, space_for};
+pub use crdt::{TextError, TextPayload, Texts, char_pos};
 pub use error::{Error, Result};
 pub use hub::{EVENTS, Hub, decode, emit, encode, receive};
 pub use live::{Live, Work};

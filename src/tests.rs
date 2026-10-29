@@ -113,7 +113,7 @@ fn sub(peer: &str, may_edit: bool, command: &str, params: serde_json::Value, sco
 fn room_with(ids: &[(&str, bool)]) -> Room {
     let mut r = Room::default();
     for (id, may_edit) in ids {
-        r.join(peer(id, *may_edit));
+        let _ = r.join(peer(id, *may_edit));
     }
     r
 }
@@ -165,6 +165,90 @@ fn a_crdt_text_edit_ignores_a_held_lock() {
     assert!(op.scope.is_none(), "a crdt.* command must not keep the client's scope");
 }
 
+/// A document may not grow without bound. The count cap alone left size unbounded, and one
+/// authenticated editor could hold a large multiple of the intended memory per room.
+#[test]
+fn an_oversized_edit_is_refused() {
+    let mut r = room_with(&[("alice", true)]);
+    let big = json!({ "blob": "x".repeat(crate::room::HISTORY_BYTES + 1) });
+    match r.submit(1, sub("alice", true, "cell.set", big, None)) {
+        Err(Refusal::TooLarge { bytes }) => assert!(bytes > crate::room::HISTORY_BYTES),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_document_stops_admitting_peers_at_the_cap() {
+    let mut r = Room::default();
+    for i in 0..crate::room::MAX_PEERS {
+        assert!(r.join(peer(&format!("peer-{i}"), true)).is_ok());
+    }
+    assert_eq!(r.join(peer("one-too-many", true)), Err(Refusal::Full));
+    // A reconnecting peer replaces its own entry and is never refused for being at the cap.
+    assert!(r.join(peer("peer-0", true)).is_ok());
+}
+
+/// A joining peer is replayed the CRDT operations it missed, because the file it is about to
+/// open is behind every edit made since that file was written.
+#[test]
+fn crdt_operations_are_kept_for_a_peer_that_has_not_joined_yet() {
+    let mut r = room_with(&[("alice", true)]);
+    let payload = json!({"scope": "/body/0", "ops": [{"Ins": {"after": null, "id": 1, "ch": "a"}}]});
+    r.submit(1, sub("alice", true, "crdt.text", payload, None)).expect("ok");
+    let log = r.texts().get("/body/0").expect("the scope was retained");
+    assert_eq!(log.ops().len(), 1);
+    assert!(log.complete(), "nothing was dropped, so the text can be rebuilt");
+}
+
+/// Past the per-scope budget the relay says so. Dropping the oldest operations would leave a
+/// replay that cannot be applied, because later ones anchor on characters those created.
+#[test]
+fn a_scope_past_its_budget_is_reported_incomplete() {
+    let mut r = room_with(&[("alice", true)]);
+    let ops = json!([{ "blob": "x".repeat(crate::room::TEXT_BYTES + 1) }]);
+    r.submit(1, sub("alice", true, "crdt.text", json!({"scope": "/body/0", "ops": ops}), None)).expect("ok");
+    let log = r.texts().get("/body/0").expect("the scope is known");
+    assert!(!log.complete());
+    assert!(log.ops().is_empty(), "a partial replay is worse than none, and is not offered");
+}
+
+/// Latest wins, and the newest value per kind is what a joining peer is handed.
+#[test]
+fn ephemeral_state_keeps_only_the_newest_value_per_kind() {
+    let mut r = room_with(&[("alice", true)]);
+    r.remember_ephemeral("alice", "camera", json!({"distance": 100})).expect("ok");
+    r.remember_ephemeral("alice", "camera", json!({"distance": 200})).expect("ok");
+    r.remember_ephemeral("alice", "at", json!({"point": [1, 2, 3]})).expect("ok");
+    let state = r.ephemeral();
+    assert_eq!(state.len(), 2, "two kinds, one value each");
+    let camera = state.iter().find(|(_, kind, _)| kind == "camera").expect("camera");
+    assert_eq!(camera.2, json!({"distance": 200}));
+}
+
+#[test]
+fn a_peer_cannot_grow_a_room_by_inventing_kind_names() {
+    let mut r = room_with(&[("alice", true)]);
+    for i in 0..crate::room::MAX_EPHEMERAL_KINDS {
+        r.remember_ephemeral("alice", &format!("kind-{i}"), json!(1)).expect("within the cap");
+    }
+    assert!(r.remember_ephemeral("alice", "one-too-many", json!(1)).is_err());
+    // An existing kind still updates, because that is the latest-wins path and costs nothing.
+    assert!(r.remember_ephemeral("alice", "kind-0", json!(2)).is_ok());
+}
+
+/// Their camera goes with them. A marker left behind would show somebody looking at a part
+/// they are no longer in.
+#[test]
+fn leaving_clears_that_peers_ephemeral_state() {
+    let mut r = room_with(&[("alice", true), ("bob", true)]);
+    r.remember_ephemeral("alice", "camera", json!({"distance": 100})).expect("ok");
+    r.remember_ephemeral("bob", "camera", json!({"distance": 200})).expect("ok");
+    r.leave("alice");
+    let state = r.ephemeral();
+    assert_eq!(state.len(), 1);
+    assert_eq!(state[0].0, "bob");
+}
+
 #[test]
 fn a_crdt_command_still_requires_edit_access() {
     let mut r = room_with(&[("bob", false)]);
@@ -199,7 +283,7 @@ fn unlock_only_releases_your_own() {
 #[test]
 fn rejoining_replaces_the_earlier_connection() {
     let mut r = room_with(&[("alice", true)]);
-    r.join(peer("alice", true));
+    let _ = r.join(peer("alice", true));
     assert_eq!(r.peers().len(), 1, "a reconnect must not duplicate the peer");
 }
 

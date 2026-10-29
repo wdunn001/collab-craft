@@ -59,6 +59,11 @@ use tokio::sync::Mutex;
 
 use bus::{Bus, LockOutcome};
 use room::{Op, Peer, Refusal, Room, Submission, is_crdt_command};
+
+/// Bytes one opaque frame may carry, base64 included.
+///
+/// Frames are passed through unread, so nothing downstream can judge the size. The relay has to.
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 use token::Claims;
 
 const DEFAULT_VALKEY: &str = "redis://valkey:6379/6";
@@ -102,11 +107,25 @@ struct ResyncMsg {
     have: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct FrameMsg {
+    payload: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EphemeralMsg {
+    kind: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
 #[derive(Debug, Serialize)]
 struct JoinedMsg<'a> {
     doc: String,
     peer: &'a str,
     seq: u64,
+    /// The CRDT id space this connection may mint character ids in. Never 0.
+    space: u32,
     roster: &'a [Peer],
     locks: Vec<LockEntry>,
 }
@@ -154,7 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secret_bytes = secret.clone().into_bytes();
     let relay = Arc::new(Relay { secret: secret_bytes.clone(), bus: Mutex::new(bus), rooms: Mutex::new(HashMap::new()) });
 
-    let (layer, io) = SocketIo::builder().with_state(relay).build_layer();
+    // Cap the transport too. Room::submit refuses an oversized `params` after decoding, and a
+    // cap there still means the bytes were read and parsed first. This refuses them at the
+    // socket, which is the only place that costs nothing.
+    let (layer, io) = SocketIo::builder().max_payload(MAX_FRAME_BYTES as u64).with_state(relay).build_layer();
     // ns returns () for the local adapter, so there is nothing to await here.
     io.ns("/", on_connect);
 
@@ -338,6 +360,8 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
     socket.on("lock", on_lock);
     socket.on("unlock", on_unlock);
     socket.on("resync", on_resync);
+    socket.on("frame", on_frame);
+    socket.on("ephemeral", on_ephemeral);
     socket.on_disconnect(on_disconnect);
     socket.join(room_name.clone());
 
@@ -349,14 +373,47 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
         })
     };
 
-    let (seq, roster) = {
+    // One id space per connection, from the bus, so two relays cannot grant the same one and a
+    // restart cannot hand one out twice. A client that derived its own from its peer id could
+    // collide with another peer's, and the two would then mint the same character ids and drop
+    // each other's text.
+    let space = {
+        let mut bus = relay.bus.lock().await;
+        match bus.next_space(&room_key).await {
+            Ok(s) => s,
+            Err(e) => {
+                // Refuse rather than admit a peer with no space. Admitting it would mean
+                // either silent divergence or a window that cannot type, and neither is
+                // something a user could act on.
+                tracing::error!(error = %e, room = %room_key, "could not grant an id space");
+                let _ = socket.emit("error", &ErrorMsg { doc: room_name.clone(), detail: "relay could not start a session".to_owned() });
+                let _ = socket.disconnect();
+                return;
+            }
+        }
+    };
+
+    let joined = {
         let mut rooms = relay.rooms.lock().await;
         let room = rooms.entry(room_key.clone()).or_default();
-        room.join(Peer { peer: peer_id.clone(), display: claims.dsp.clone(), may_edit: claims.may_edit() });
-        for (scope, holder) in &locks {
-            room.record_holder(scope.clone(), holder.clone());
+        match room.join(Peer { peer: peer_id.clone(), display: claims.dsp.clone(), may_edit: claims.may_edit() }) {
+            Ok(()) => {
+                for (scope, holder) in &locks {
+                    room.record_holder(scope.clone(), holder.clone());
+                }
+                let texts: Vec<(String, Vec<serde_json::Value>, bool)> =
+                    room.texts().iter().map(|(scope, log)| (scope.clone(), log.ops().to_vec(), log.complete())).collect();
+                Some((room.seq(), room.peers().to_vec(), texts, room.ephemeral()))
+            }
+            Err(_) => None,
         }
-        (room.seq(), room.peers().to_vec())
+    };
+
+    let Some((seq, roster, texts, ephemeral)) = joined else {
+        tracing::warn!(room = %room_key, "refusing a peer: the document is full");
+        let _ = socket.emit("error", &ErrorMsg { doc: room_name.clone(), detail: Refusal::Full.detail() });
+        let _ = socket.disconnect();
+        return;
     };
 
     let _ = socket.emit(
@@ -365,10 +422,25 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
             doc: room_name.clone(),
             peer: &peer_id,
             seq,
+            space,
             roster: &roster,
             locks: locks.iter().map(|(s, h)| LockEntry { scope: s.clone(), holder: h.clone() }).collect(),
         },
     );
+
+    // Catch the new peer up on text. The file it is about to open is behind every edit made
+    // since that file was written, and the sequence is already past those edits, so they cannot
+    // be replayed as ordered ops. These carry no sequence for that reason.
+    for (scope, ops, complete) in texts {
+        let _ = socket.emit("text_ops", &serde_json::json!({ "doc": room_name.clone(), "scope": scope, "ops": ops, "complete": complete }));
+    }
+
+    // And on where everybody is, so somebody arriving late does not have to wait for each
+    // person to move before their marker appears.
+    for (peer, kind, payload) in ephemeral {
+        let _ = socket.emit("ephemeral", &serde_json::json!({ "doc": room_name.clone(), "origin": peer, "kind": kind, "payload": payload }));
+    }
+
     let _ = socket.to(room_name.clone()).emit("presence", &serde_json::json!({ "doc": room_name, "roster": roster })).await;
 
     tracing::info!(uid = %claims.uid, peer = %peer_id, room = %room_key, may_edit = claims.may_edit(), "peer joined");
@@ -576,6 +648,54 @@ async fn on_resync(socket: SocketRef, Data(msg): Data<ResyncMsg>, State(relay): 
             let _ = socket.emit("snapshot", &serde_json::json!({ "doc": room_name, "seq": seq, "document": serde_json::Value::Null }));
         }
     }
+}
+
+/// Pass one opaque frame to the rest of the room.
+///
+/// Nothing here decodes the payload, assigns it a sequence or keeps a copy. That is the whole
+/// point: a caller that signs its own frames and chains each to the previous hash keeps both
+/// properties end to end, and a relay that re-read or re-ordered them would break the chain.
+/// Not echoed to the sender, which already has it.
+async fn on_frame(socket: SocketRef, Data(msg): Data<FrameMsg>, State(relay): State<Arc<Relay>>) {
+    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let room_name = claims.room();
+    let _ = &relay;
+
+    if !claims.may_edit() {
+        let _ = socket.emit("error", &ErrorMsg { doc: room_name, detail: Refusal::ReadOnly.detail() });
+        return;
+    }
+    if msg.payload.len() > MAX_FRAME_BYTES {
+        let _ = socket.emit("error", &ErrorMsg { doc: room_name, detail: Refusal::TooLarge { bytes: msg.payload.len() }.detail() });
+        return;
+    }
+
+    let _ = socket.to(room_name.clone()).emit("frame", &serde_json::json!({ "doc": room_name, "origin": claims.pid, "payload": msg.payload })).await;
+}
+
+/// Record and pass on one latest-wins value about this peer.
+///
+/// A camera, a selection, a caret. Allowed without edit permission, because somebody watching a
+/// design should still be able to say where they are looking. The newest value per peer and kind
+/// is kept so a joining peer can be told where everybody is, and nothing here takes a sequence
+/// number: ordering ephemeral state would make a stale camera wait behind an edit.
+async fn on_ephemeral(socket: SocketRef, Data(msg): Data<EphemeralMsg>, State(relay): State<Arc<Relay>>) {
+    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let room_name = claims.room();
+
+    let remembered = {
+        let mut rooms = relay.rooms.lock().await;
+        rooms.entry(claims.rm.clone()).or_default().remember_ephemeral(&claims.pid, &msg.kind, msg.payload.clone())
+    };
+    if let Err(refusal) = remembered {
+        let _ = socket.emit("error", &ErrorMsg { doc: room_name, detail: refusal.detail() });
+        return;
+    }
+
+    let _ = socket
+        .to(room_name.clone())
+        .emit("ephemeral", &serde_json::json!({ "doc": room_name, "origin": claims.pid, "kind": msg.kind, "payload": msg.payload }))
+        .await;
 }
 
 async fn on_disconnect(socket: SocketRef, State(relay): State<Arc<Relay>>) {
