@@ -503,7 +503,7 @@ dependencies = [
 [[package]]
 name = "craft-crdt"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/craft-libs?rev=96ceda5c9560a245cbb31798ef48fe49fbe2b863#96ceda5c9560a245cbb31798ef48fe49fbe2b863"
+source = "git+https://github.com/wdunn001/craft-libs?rev=51cf8664922608321fbd61ada80ddfb78562d71c#51cf8664922608321fbd61ada80ddfb78562d71c"
 dependencies = [
  "postcard",
  "serde",
