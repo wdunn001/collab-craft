@@ -234,6 +234,31 @@ A 16 MB bundle becomes about 5 MB.
 
 Leave the directory empty to run as an API and relay only.
 
+## One relay per document
+
+A document is served by exactly one relay process. Nothing enforces that, and
+getting it wrong is quiet rather than loud, so it belongs in front of the
+deployment notes.
+
+The shared Valkey makes two pieces safe across instances. `INCR` means two
+relays cannot hand out the same sequence number, and `SET NX` means two cannot
+grant the same scope lock. Fan-out is not one of those pieces. An ordered edit
+reaches the room through the Socket.IO in-process adapter, so a second instance
+serving the same document would take sequence numbers from the shared counter
+and deliver only its own half of them. Every client on both sides would sit on a
+permanent gap in the sequence, ask for a resync, and be told to reopen the file.
+
+Run one relay, or route a document to a fixed instance. A load balancer in front
+of several relays needs session affinity on the document, not on the client.
+
+Carrying edits between instances needs a Socket.IO adapter with a broker behind
+it, which is a real change rather than a configuration flag: the adapter has to
+be installed on the builder before `io.ns`, every broadcast path has to become
+fallible and awaited, and the result has to be tested against two relays and a
+Valkey together. `socketioxide-redis` was a declared dependency that nothing
+used, which read as though this already worked. It is gone until the work is
+done.
+
 ## How an edit travels
 
 The API asks the provider whether this user may open this document, signs a
@@ -242,10 +267,42 @@ that signature locally and never calls back. Authorisation costs one round trip
 per document, not one per keystroke.
 
 Each edit gets a sequence number from the bus and is fanned out in that order.
-Concurrent work in different regions proceeds freely; concurrent work in the
-same region is serialised by a scope lock. That is deliberately short of a
-CRDT. A CRDT would need stable identity for positions and a rewrite of each
-app's document model.
+Concurrent work in different regions proceeds freely. Concurrent work in the
+same region is serialised by a scope lock.
+
+Text is the exception, because a lock on a paragraph serialises exactly what two
+people writing in it want merged. Commands named `crdt.*` carry per-scope RGA
+operations from `craft-crdt`, and the relay strips any scope from them. Two
+people type in one paragraph and both insertions survive, with no lock and no
+authority deciding between them. Structured commands that do not commute, such
+as a boolean or a render, still take a lock.
+
+Two rules keep the character identities honest. Every scope allocates from its
+own counters, so the ids a paragraph receives cannot move when another paragraph
+is loaded first. The relay grants each connection its own id space in the join
+payload, and a client mints nothing before that arrives.
+
+A peer joining a live session cannot reach the room's text by reading the file,
+because the file is behind every edit made since it was written. The relay
+replays the `crdt.*` operations it still holds, per scope, outside the sequence.
+The peer loads the file and the replay lands on top, in either order. A scope the
+relay could not keep whole is reported as incomplete rather than left to look
+current.
+
+## Pass-through and ephemeral messages
+
+Two message kinds carry nothing the relay reads.
+
+A **frame** is opaque bytes. No sequence, no history, no decoding, so a caller
+that signs and orders its own traffic keeps both properties end to end. It needs
+edit permission.
+
+An **ephemeral** message is latest-wins state about one peer, such as a camera, a
+selection or a caret. The relay keeps only the newest value per peer and kind,
+and hands those to a joining peer so somebody arriving late sees where everyone
+is without waiting for them to move. It needs no edit permission, because
+somebody watching a design should still be able to say where they are looking.
+Nothing ephemeral is ordered, replayed or journaled.
 
 ## Licence
 

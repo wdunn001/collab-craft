@@ -12,6 +12,7 @@ fn joined(seq: u64) -> ServerMsg {
         doc: DOC.to_owned(),
         peer: "me".to_owned(),
         seq,
+        space: 7,
         roster: vec![Presence { peer: "me".to_owned(), display: "Alice".to_owned() }],
         locks: Vec::new(),
     }
@@ -54,6 +55,7 @@ fn a_join_sorts_existing_locks_into_mine_and_theirs() {
         doc: DOC.to_owned(),
         peer: "me".to_owned(),
         seq: 0,
+        space: 7,
         roster: Vec::new(),
         locks: vec![LockState { scope: "A1".to_owned(), holder: "me".to_owned() }, LockState { scope: "B2".to_owned(), holder: "bob".to_owned() }],
     });
@@ -96,6 +98,48 @@ fn an_in_order_remote_op_is_applied() {
         other => panic!("expected Apply, got {other:?}"),
     }
     assert_eq!(s.applied(), 1);
+}
+
+/// The relay grants the id space, and the session hands it on as an effect so nothing has to
+/// remember to read a field. A relay too old to grant one sends 0, and that must not be taken
+/// as a space: minting characters in it would reuse the file's own identities.
+#[test]
+fn the_granted_id_space_arrives_as_an_effect() {
+    let mut s = Session::new(DOC);
+    let effects = s.handle(joined(0));
+    assert_eq!(s.space(), Some(7));
+    assert!(effects.contains(&Effect::Space { space: 7 }), "the space is announced, not left to be polled");
+
+    let mut old_relay = Session::new(DOC);
+    let effects =
+        old_relay.handle(ServerMsg::Joined { doc: DOC.to_owned(), peer: "me".to_owned(), seq: 0, space: 0, roster: Vec::new(), locks: Vec::new() });
+    assert_eq!(old_relay.space(), None);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Space { .. })));
+}
+
+#[test]
+fn a_frame_carries_no_sequence_and_no_counter() {
+    let s = Session::new(DOC);
+    let before = s.inflight();
+    let msg = s.frame("c2lnbmVk");
+    assert_eq!(msg, ClientMsg::Frame { doc: DOC.to_owned(), payload: "c2lnbmVk".to_owned() });
+    assert_eq!(s.inflight(), before, "a frame is never awaiting confirmation");
+}
+
+#[test]
+fn an_ephemeral_message_carries_its_kind() {
+    let s = Session::new(DOC);
+    let msg = s.ephemeral("camera", json!({"eye": [0, 0, 10]}));
+    assert_eq!(msg, ClientMsg::Ephemeral { doc: DOC.to_owned(), kind: "camera".to_owned(), payload: json!({"eye": [0, 0, 10]}) });
+}
+
+#[test]
+fn replayed_text_operations_reach_the_app_outside_the_sequence() {
+    let mut s = Session::new(DOC);
+    s.handle(joined(99));
+    let effects = s.handle(ServerMsg::TextOps { doc: DOC.to_owned(), scope: "/body/0".to_owned(), ops: json!([]), complete: true });
+    assert_eq!(effects, vec![Effect::TextOps { scope: "/body/0".to_owned(), ops: json!([]), complete: true }]);
+    assert_eq!(s.applied(), 99, "a replay never moves the sequence");
 }
 
 #[test]
@@ -376,9 +420,11 @@ fn every_client_message_has_an_event_name() {
         ClientMsg::Lock { doc: DOC.to_owned(), scope: "B2".to_owned() },
         ClientMsg::Unlock { doc: DOC.to_owned(), scope: "B2".to_owned() },
         ClientMsg::Resync { doc: DOC.to_owned(), have: 9 },
+        ClientMsg::Frame { doc: DOC.to_owned(), payload: "c2lnbmVk".to_owned() },
+        ClientMsg::Ephemeral { doc: DOC.to_owned(), kind: "camera".to_owned(), payload: json!({"eye": [0, 0, 1]}) },
     ];
     let names: Vec<&str> = msgs.iter().map(|m| emit(m).0).collect();
-    assert_eq!(names, ["join", "leave", "submit", "lock", "unlock", "resync"]);
+    assert_eq!(names, ["join", "leave", "submit", "lock", "unlock", "resync", "frame", "ephemeral"]);
 }
 
 #[test]
@@ -415,6 +461,9 @@ fn every_event_name_carries_exactly_one_server_message() {
         ServerMsg::LockReleased { doc: DOC.to_owned(), scope: "B2".to_owned() },
         ServerMsg::Presence { doc: DOC.to_owned(), roster: Vec::new() },
         ServerMsg::Snapshot { doc: DOC.to_owned(), seq: 9, document: json!({}) },
+        ServerMsg::TextOps { doc: DOC.to_owned(), scope: "/body/0".to_owned(), ops: json!([]), complete: true },
+        ServerMsg::Frame { doc: DOC.to_owned(), origin: "bob".to_owned(), payload: "c2lnbmVk".to_owned() },
+        ServerMsg::Ephemeral { doc: DOC.to_owned(), origin: "bob".to_owned(), kind: "camera".to_owned(), payload: json!({"eye": [0, 0, 1]}) },
         ServerMsg::Error { doc: DOC.to_owned(), detail: "refused".to_owned() },
     ];
     let mut seen = Vec::new();
