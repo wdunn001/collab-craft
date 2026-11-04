@@ -27,9 +27,9 @@ todo = "warn"
 # craft-ui speaks the craft-cloud vocabulary, so two revisions put two
 # `Permission` types in one binary and nothing can be passed between them.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd724bf28ccbe51a1f45f19022f131f15bb" }
-craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd724bf28ccbe51a1f45f19022f131f15bb" }
-craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd724bf28ccbe51a1f45f19022f131f15bb" }
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "00305cd2b57bb7bd48a4d1b0c5872047c1738a9c" }
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "00305cd2b57bb7bd48a4d1b0c5872047c1738a9c" }
+craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "00305cd2b57bb7bd48a4d1b0c5872047c1738a9c" }
 # Sibling crate; its PR is not mixed into the cloud/ui/esign pin.
 craft-crdt = { git = "https://github.com/wdunn001/craft-libs", rev = "51cf8664922608321fbd61ada80ddfb78562d71c" }
 craft-collab = { path = "crates/collab" }
@@ -48,6 +48,16 @@ quick-xml = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+# craft-ui declares egui = "0.37" and craft-libs' own workspace patches that
+# requirement to its fork, where the APIs craft-ui actually calls (ime_context,
+# Style::right_to_left, IMEOutput::new) live. A `[patch]` section only applies
+# within the workspace that writes it, so craft-libs' patch does not reach us
+# when we pull craft-ui in as a git dependency. Without this, cargo resolves
+# the bare "0.37" requirement against the unpatched crates.io release, which
+# is missing those APIs, and craft-ui fails to compile.
+[patch.crates-io]
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 
 [package]
 name = "collabcraft-relay"
