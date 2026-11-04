@@ -31,7 +31,7 @@ craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd72
 craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd724bf28ccbe51a1f45f19022f131f15bb" }
 craft-esign = { git = "https://github.com/wdunn001/craft-libs", rev = "1a3cbfd724bf28ccbe51a1f45f19022f131f15bb" }
 # Sibling crate; its PR is not mixed into the cloud/ui/esign pin.
-craft-crdt = { git = "https://github.com/wdunn001/craft-libs", rev = "96ceda5c9560a245cbb31798ef48fe49fbe2b863" }
+craft-crdt = { git = "https://github.com/wdunn001/craft-libs", rev = "51cf8664922608321fbd61ada80ddfb78562d71c" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
@@ -98,8 +98,14 @@ sha2 = "0.11"
 # `.extensions` field and `extract::State` does not exist.
 socketioxide = { version = "0.18", features = ["extensions", "state", "tracing"] }
 # Room fanout across relay instances, over the same Valkey. No new queue.
-socketioxide-redis = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The relay binary does not link these. Its tests do: the join-replay test drives a real
+# `craft_collab::Texts` against the operations `Room` retained, so the round trip is checked
+# against the client that has to decode it rather than against an assumption about the shape.
+[dev-dependencies]
+craft-collab = { workspace = true }
+craft-crdt = { workspace = true }

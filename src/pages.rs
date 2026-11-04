@@ -344,8 +344,7 @@ async fn linked_account(app: &App, session: &Session) -> Option<Result<Linked, S
 /// Reads the link record and opens nothing. A page that only has to say
 /// "linked" or "not linked" must not wait on a provider to say it.
 async fn storage_linked(app: &App, session: &Session) -> bool {
-    !session.is_guest()
-        && (app.store.provider_link(&session.user).await.is_some() || !app.store.connections(&session.user).await.is_empty())
+    !session.is_guest() && (app.store.provider_link(&session.user).await.is_some() || !app.store.connections(&session.user).await.is_empty())
 }
 
 /// The connections this person holds, and a button for each kind this deployment allows.
@@ -494,12 +493,7 @@ async fn catalog(app: &App) -> Vec<crate::settings::Offer> {
     if let Some(client_id) = crate::settings::google_client_from_env()
         && !offers.iter().any(|offer| offer.kind == "google")
     {
-        offers.push(crate::settings::Offer {
-            kind: "google".to_owned(),
-            base: "https://www.googleapis.com".to_owned(),
-            contacts: None,
-            client_id,
-        });
+        offers.push(crate::settings::Offer { kind: "google".to_owned(), base: "https://www.googleapis.com".to_owned(), contacts: None, client_id });
     }
     offers
 }
@@ -1019,7 +1013,8 @@ async fn remember(app: &App, owner: &str, config: &crate::settings::ProviderConf
         default: legacy.is_none() && app.store.connections(owner).await.iter().all(|c| !c.default),
     };
     if config.kind == "google" {
-        connection.client_id = app.store.offers().await.into_iter().find(|offer| offer.kind == "google").map(|offer| offer.client_id).unwrap_or_default();
+        connection.client_id =
+            app.store.offers().await.into_iter().find(|offer| offer.kind == "google").map(|offer| offer.client_id).unwrap_or_default();
         if connection.client_id.is_empty() {
             connection.client_id = crate::settings::google_client_from_env().unwrap_or_default();
         }
@@ -1313,13 +1308,16 @@ pub async fn provider_save(State(app): State<Arc<App>>, session: Session, Form(f
                 .unwrap_or_default();
         }
         if !form.client_secret.trim().is_empty() && !app.store.put_google_secret(form.client_secret.trim()).await {
-            let strip = String::from("<p class=\"strip bad\">The address is saved. The client secret could not be stored. The bus is unreachable.</p>");
+            let strip =
+                String::from("<p class=\"strip bad\">The address is saved. The client secret could not be stored. The bus is unreachable.</p>");
             let body = provider_body(&app, &session, in_use.as_ref(), Some(&strip), Some(&form));
             return (StatusCode::INTERNAL_SERVER_ERROR, Html(layout("Cloud provider", Some(&session), &body))).into_response();
         }
     }
     if !app.store.upsert_offer(&offer).await {
-        let strip = String::from("<p class=\"strip bad\">The address is saved. This service could not add it to the list people may connect. The bus is unreachable.</p>");
+        let strip = String::from(
+            "<p class=\"strip bad\">The address is saved. This service could not add it to the list people may connect. The bus is unreachable.</p>",
+        );
         let body = provider_body(&app, &session, in_use.as_ref(), Some(&strip), Some(&form));
         return (StatusCode::INTERNAL_SERVER_ERROR, Html(layout("Cloud provider", Some(&session), &body))).into_response();
     }
@@ -1437,10 +1435,7 @@ pub fn apps_body(app: &App, session: &Session, entitled: &Permissions, source: S
         Some(form) => (form.default.clone(), groups_from_form(form)),
         None => (entitled.default_apps().to_vec(), entitled.group_apps().iter().map(|(name, apps)| (name.clone(), apps.clone())).collect()),
     };
-    body.push_str(&format!(
-        "<h2>Change it</h2><section class=\"panel\"><form method=\"post\" action=\"/settings/apps\">{}",
-        hidden_csrf(&token)
-    ));
+    body.push_str(&format!("<h2>Change it</h2><section class=\"panel\"><form method=\"post\" action=\"/settings/apps\">{}", hidden_csrf(&token)));
     if hosted.is_empty() {
         body.push_str("<p>This deployment is not hosting an application yet. There is nothing to grant.</p>");
     } else {
@@ -1564,9 +1559,8 @@ pub fn provider_body(
     body.push_str("</dl></section>");
 
     let token = csrf(&app.secret, &session.user);
-    let kind_now = typed
-        .map(|t| t.kind.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| in_use.map(|(config, _)| config.kind.clone()).unwrap_or_default());
+    let kind_now =
+        typed.map(|t| t.kind.trim().to_ascii_lowercase()).unwrap_or_else(|| in_use.map(|(config, _)| config.kind.clone()).unwrap_or_default());
     let base_now = typed.map(|t| t.base.trim().to_owned()).unwrap_or_else(|| in_use.map(|(config, _)| config.base.clone()).unwrap_or_default());
     let contacts_now =
         typed.map(|t| t.contacts.trim().to_owned()).unwrap_or_else(|| in_use.and_then(|(config, _)| config.contacts.clone()).unwrap_or_default());

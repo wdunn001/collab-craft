@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use craft_cloud::{
-    Accounts, Capability, Contact, Contacts, Conversations, Entry, Error, Files, Identity, Mail, MailMessage, Notification, Notifications, Permission,
-    Provider, Result, Share, ShareOptions, ShareTarget, Sharing, Conversation,
+    Accounts, Capability, Contact, Contacts, Conversation, Conversations, Entry, Error, Files, Identity, Mail, MailMessage, Notification,
+    Notifications, Permission, Provider, Result, Share, ShareOptions, ShareTarget, Sharing,
 };
 
 const MARK: &str = "cx:";

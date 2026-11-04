@@ -86,6 +86,15 @@ pub enum ClientMsg {
     /// Ask for everything after `have`. The relay answers with ops, or with
     /// [`ServerMsg::Snapshot`] when it can no longer reach that far back.
     Resync { doc: DocId, have: u64 },
+    /// Offer an opaque frame for pass-through. See [`ServerMsg::Frame`].
+    ///
+    /// Requires edit permission, because a frame carries changes the relay cannot inspect.
+    Frame { doc: DocId, payload: String },
+    /// Offer latest-wins state about this peer. See [`ServerMsg::Ephemeral`].
+    ///
+    /// Allowed without edit permission: somebody watching a design should still be able to
+    /// say where they are looking.
+    Ephemeral { doc: DocId, kind: String, payload: Value },
 }
 
 /// Relay to client.
@@ -98,8 +107,55 @@ pub enum ServerMsg {
         doc: DocId,
         peer: PeerId,
         seq: u64,
+        /// The id space this connection may mint CRDT character ids in. Never 0: space 0 is
+        /// the file's own, so every replica that loads the same string agrees on it.
+        ///
+        /// Granted by the relay, because a client that derived its own could collide with
+        /// another peer's and the two would then drop each other's characters. `0` means a
+        /// relay too old to grant one, and a client treats that as "no space yet".
+        #[serde(default)]
+        space: u32,
         roster: Vec<Presence>,
         locks: Vec<LockState>,
+    },
+    /// CRDT operations a joining peer missed, outside the sequence.
+    ///
+    /// A joining peer loads the file, which is behind every edit made since it was written.
+    /// These are the retained `crdt.*` operations for one scope, replayed so the peer can
+    /// reach the text the room is actually editing. They carry no sequence, because the
+    /// sequence is already past them and [`Session`](crate::Session) would drop them as
+    /// replays.
+    ///
+    /// `complete` is false when the relay had to drop operations for this scope. The text
+    /// cannot be reconstructed then, and the peer has to be told rather than left to believe
+    /// it is current.
+    TextOps {
+        doc: DocId,
+        scope: Scope,
+        ops: Value,
+        complete: bool,
+    },
+    /// An opaque frame, passed through unread and unordered.
+    ///
+    /// For a caller that does its own ordering, signing and encryption. The relay assigns no
+    /// sequence, keeps no history and never decodes the payload, so a signed hash chain
+    /// survives the trip. Never echoed to the sender.
+    Frame {
+        doc: DocId,
+        origin: PeerId,
+        /// Base64 of the caller's bytes. The transport is JSON.
+        payload: String,
+    },
+    /// Latest-wins state about one peer, with no place in the document's history.
+    ///
+    /// A camera, a selection, a caret. `kind` is the caller's own label and the relay keeps
+    /// only the newest value per peer and kind, which is what a joining peer is sent. Never
+    /// echoed to the sender, never ordered, never journaled.
+    Ephemeral {
+        doc: DocId,
+        origin: PeerId,
+        kind: String,
+        payload: Value,
     },
     /// An ordered edit. Every peer receives every op, including the one that sent it.
     Op {
@@ -161,6 +217,9 @@ impl ServerMsg {
             | ServerMsg::LockReleased { doc, .. }
             | ServerMsg::Presence { doc, .. }
             | ServerMsg::Snapshot { doc, .. }
+            | ServerMsg::TextOps { doc, .. }
+            | ServerMsg::Frame { doc, .. }
+            | ServerMsg::Ephemeral { doc, .. }
             | ServerMsg::Error { doc, .. } => doc,
         }
     }
