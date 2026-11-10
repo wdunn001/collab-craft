@@ -225,14 +225,14 @@ impl Settings {
 pub async fn probe(config: &ProviderConfig) -> Result<(), String> {
     let config = config.clone();
     let probing = tokio::task::spawn_blocking(move || match config.kind.as_str() {
-        "nextcloud" => craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &config.base).map(|_| ()).map_err(|e| e.to_string()),
-        "owncloud" => match craft_nextcloud::status(&crate::transport::ReqwestHttp::default(), &config.base) {
+        "nextcloud" => craft_nextcloud::begin(&crate::transport::ReqwestHttp, &config.base).map(|_| ()).map_err(|e| e.to_string()),
+        "owncloud" => match craft_nextcloud::status(&crate::transport::ReqwestHttp, &config.base) {
             Ok(s) if !s.installed => Err("the server answered and is not installed yet".to_owned()),
             Ok(s) if s.maintenance => Err("the server answered and is in maintenance mode".to_owned()),
             Ok(_) => Ok(()),
             Err(e) => Err(e.to_string()),
         },
-        "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp::default(), &config.layout()),
+        "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp, &config.layout()),
         // Nothing to dial. The client id is checked when somebody connects.
         "google" => Ok(()),
         "git" => crate::git::probe(&config.base),

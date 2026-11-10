@@ -381,9 +381,9 @@ impl App {
 /// a `dyn Provider` and never learns which it got.
 pub fn provider_from(config: &crate::settings::ProviderConfig, user: &str, password: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
     match config.kind.as_str() {
-        "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
-        "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
-        "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp::default()))),
+        "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp))),
+        "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp))),
+        "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp))),
         "google" => Some(Arc::new(crate::google::Drive::new(String::new(), String::new(), password))),
         "git" => Some(Arc::new(crate::git::Git::new(&config.base, user, password))),
         _ => None,

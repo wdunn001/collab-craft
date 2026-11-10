@@ -70,6 +70,10 @@ use token::Claims;
 const DEFAULT_VALKEY: &str = "redis://valkey:6379/6";
 const DEFAULT_BIND: &str = "0.0.0.0:9444";
 
+/// The largest document body a save may carry. Axum's own default is 2 MiB,
+/// which refuses real documents, so this is the ceiling the API routes use.
+const MAX_SAVE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Shared relay state.
 struct Relay {
     secret: Vec<u8>,
@@ -264,7 +268,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // and a recipient is not one.
         .route("/invite/token", axum::routing::get(recipient::token))
         .route("/invite/content", axum::routing::get(recipient::read).put(recipient::write))
-        .nest("/esign", esign::router());
+        .nest("/esign", esign::router())
+        // Axum caps a request body at 2 MiB by default, so a save of a real
+        // document (a drawing, a sheet with images) was refused with 413 before
+        // it ever reached the provider. Raise it to a document-sized ceiling.
+        // The provider's own transport still bounds what it will read back.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_SAVE_BYTES));
 
     let auth_routes = axum::Router::new()
         .route("/login", axum::routing::get(auth::login))
@@ -396,9 +405,18 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
         }
     };
 
+    // Where the document already was, read from the bus before the first peer
+    // joins. A room rebuilt in memory starts at sequence zero, and handing out
+    // a number a client has already seen is what made a reopen replay or stall.
+    let retained_seq = {
+        let mut bus = relay.bus.lock().await;
+        bus.current_seq(&room_key).await.unwrap_or(0)
+    };
+
     let joined = {
         let mut rooms = relay.rooms.lock().await;
         let room = rooms.entry(room_key.clone()).or_default();
+        room.observe_seq(retained_seq);
         match room.join(Peer { peer: peer_id.clone(), display: claims.dsp.clone(), may_edit: claims.may_edit() }) {
             Ok(()) => {
                 for (scope, holder) in &locks {

@@ -131,6 +131,21 @@ impl Bus {
         Ok(next)
     }
 
+    /// The retained sequence high-water mark for a document, zero when absent.
+    ///
+    /// Read-only, so a peer joining an empty in-memory room can learn where the
+    /// document already was without advancing the counter. Used to seed the
+    /// room's sequence on join.
+    pub async fn current_seq(&mut self, room: &str) -> Result<u64, BusError> {
+        let key = format!("{PREFIX}:doc:{}:seq", encode_key(room));
+        let v: Option<u64> = match self.conn.get(&key).await {
+            Ok(v) => v,
+            Err(e) if is_readonly(&e) => return Err(BusError::ReadOnlyReplica),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(v.unwrap_or(0))
+    }
+
     /// The next CRDT id space for a document.
     ///
     /// One `INCR` per connection, from the same instance that hands out sequences, so two

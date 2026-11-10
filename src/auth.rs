@@ -281,7 +281,7 @@ pub async fn link_start(State(app): State<Arc<App>>, session: Session) -> Respon
     }
     let base = config.base;
     let flow = tokio::task::spawn_blocking(move || {
-        let http = crate::transport::ReqwestHttp::default();
+        let http = crate::transport::ReqwestHttp;
         craft_nextcloud::begin(&http, &base)
     })
     .await;
@@ -316,7 +316,7 @@ pub async fn link_poll(State(app): State<Arc<App>>, session: Session, Json(q): J
     }
 
     let polled = tokio::task::spawn_blocking(move || {
-        let http = crate::transport::ReqwestHttp::default();
+        let http = crate::transport::ReqwestHttp;
         let f = craft_nextcloud::LoginFlow { login_url: String::new(), endpoint: flow.endpoint, token: flow.token };
         f.poll(&http)
     })

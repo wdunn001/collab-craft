@@ -162,6 +162,17 @@ impl Room {
         self.seq
     }
 
+    /// Raise the recorded sequence to a high-water mark learned from the bus.
+    ///
+    /// An in-memory room starts at sequence zero. When a relay restarts, or the
+    /// last peer left and the room was dropped, the Valkey counter still holds
+    /// where the document actually was. Seeding from it on join stops a reopened
+    /// document from handing out sequence numbers the clients have already seen,
+    /// which is what made a reopen replay or stall edits.
+    pub fn observe_seq(&mut self, seq: u64) {
+        self.seq = self.seq.max(seq);
+    }
+
     pub fn peers(&self) -> &[Peer] {
         &self.peers
     }

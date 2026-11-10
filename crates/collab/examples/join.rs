@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for msg in hub.poll() {
             // The first Joined tells us the real document id, so the session is
             // rebuilt around it before anything is ordered.
-            if let craft_collab::ServerMsg::Joined { doc, peer, seq, roster, locks } = &msg {
+            if let craft_collab::ServerMsg::Joined { doc, peer, seq, roster, locks, .. } = &msg {
                 println!("joined {doc} as {peer} at seq {seq}");
                 println!("  roster: {:?}", roster.iter().map(|p| &p.display).collect::<Vec<_>>());
                 println!("  locks:  {locks:?}");
@@ -94,6 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("RESYNC  asking the relay");
                         hub.send(msg)?;
                     }
+                    Effect::Space { space } => println!("SPACE   granted {space}"),
+                    Effect::TextOps { scope, complete, .. } => println!("TEXTOPS {scope} (complete {complete})"),
+                    Effect::Frame { origin, .. } => println!("FRAME   from {origin}"),
+                    Effect::Ephemeral { origin, kind, .. } => println!("EPHEM   {origin} {kind}"),
                 }
             }
         }

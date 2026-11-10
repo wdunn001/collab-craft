@@ -538,7 +538,7 @@ async fn autolink(app: &App, session: &Session, headers: &HeaderMap, flash: &Fla
         return None;
     }
     let base = bases[0].clone();
-    let begun = tokio::task::spawn_blocking(move || craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &base)).await;
+    let begun = tokio::task::spawn_blocking(move || craft_nextcloud::begin(&crate::transport::ReqwestHttp, &base)).await;
     let flow = begun.ok()?.ok()?;
     let handle = random_id();
     let config = ProviderConfig::parse("nextcloud", &bases[0]).ok()?;
@@ -782,7 +782,7 @@ pub async fn link_begin(State(app): State<Arc<App>>, session: Session, Form(form
     }
 
     let base = config.base.clone();
-    let begun = tokio::task::spawn_blocking(move || craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &base)).await;
+    let begun = tokio::task::spawn_blocking(move || craft_nextcloud::begin(&crate::transport::ReqwestHttp, &base)).await;
     let flow = match begun {
         Ok(Ok(flow)) => flow,
         Ok(Err(e)) => {
@@ -849,7 +849,7 @@ pub async fn link_finish(State(app): State<Arc<App>>, session: Session, Form(for
     let flow_base = flow.base.clone();
     let polled = tokio::task::spawn_blocking(move || {
         let flow = craft_nextcloud::LoginFlow { login_url: String::new(), endpoint: flow.endpoint, token: flow.token };
-        flow.poll(&crate::transport::ReqwestHttp::default())
+        flow.poll(&crate::transport::ReqwestHttp)
     })
     .await;
 
