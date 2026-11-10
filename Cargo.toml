@@ -89,6 +89,10 @@ tower-http = { version = "0.6", features = ["fs"] }
 getrandom = "0.3"
 base64 = "0.23"
 hmac = "0.13"
+# Sealing provider credentials at rest on the bus. The key is derived from the
+# service secret, so a copy of the Valkey keyspace yields ciphertext rather than
+# usable app passwords, PATs or refresh tokens.
+chacha20poly1305 = "0.10"
 # The bus. Valkey speaks the Redis protocol, so this client works unchanged.
 redis = { version = "1", features = ["tokio-comp", "script"] }
 serde = { version = "1", features = ["derive"] }

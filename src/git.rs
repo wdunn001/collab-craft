@@ -38,6 +38,11 @@ pub struct Git {
     /// client here has one, and a forge that accepted a connection and then said nothing would
     /// hold a blocking thread with nothing to release it.
     http: reqwest::blocking::Client,
+    /// Whether this token may push to this repository. The contents API carries
+    /// no per-file permission, so this is read once from the repo object and
+    /// cached: every entry in a repo shares it. Resolved lazily so a provider
+    /// that never lists a file never makes the call.
+    writable: std::sync::OnceLock<bool>,
 }
 
 impl Git {
@@ -52,7 +57,27 @@ impl Git {
             token: password.to_owned(),
             branch: "main".to_owned(),
             http: http_client(),
+            writable: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Whether this token may write to this repository, read once and kept.
+    ///
+    /// The forge reports `permissions.push` on the repository object, and an
+    /// archived repository is read-only even to an administrator, so both have
+    /// to hold. Anything the forge will not answer (no token, an unreachable
+    /// host, an unparseable body) is treated as not writable rather than
+    /// assumed open: a read-only grant must never widen into an edit token.
+    fn may_push(&self) -> bool {
+        *self.writable.get_or_init(|| {
+            if self.owner.is_empty() || self.repo.is_empty() {
+                return false;
+            }
+            let url = format!("{}/repos/{}/{}", self.api, self.owner, self.repo);
+            let Ok(response) = self.get(&url) else { return false };
+            let Ok(repo) = response.json::<Repo>() else { return false };
+            repo.permissions.map(|p| p.push).unwrap_or(false) && !repo.archived
+        })
     }
 
     fn client(&self) -> &reqwest::blocking::Client {
@@ -179,6 +204,22 @@ struct UserInfo {
     avatar_url: Option<String>,
 }
 
+/// The repository object, read for its permissions.
+#[derive(Deserialize)]
+struct Repo {
+    #[serde(default)]
+    permissions: Option<RepoPerms>,
+    /// An archived repository is read-only regardless of `permissions.push`.
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+struct RepoPerms {
+    #[serde(default)]
+    push: bool,
+}
+
 #[derive(Deserialize)]
 struct Content {
     #[serde(default)]
@@ -197,7 +238,7 @@ struct Content {
     download_url: Option<String>,
 }
 
-fn entry_from(item: &Content) -> Entry {
+fn entry_from(item: &Content, writable: bool) -> Entry {
     let folder = item.kind == "dir";
     Entry {
         id: item.path.clone(),
@@ -209,7 +250,7 @@ fn entry_from(item: &Content) -> Entry {
         modified: None,
         mime: None,
         etag: (!item.sha.is_empty()).then_some(item.sha.clone()),
-        writable: true,
+        writable,
         shared_by: None,
     }
 }
@@ -235,11 +276,12 @@ impl Files for Git {
         }
         let response = status(response)?;
         let body: serde_json::Value = response.json().map_err(|e| Error::malformed("contents", e.to_string()))?;
+        let writable = self.may_push();
         if let Ok(items) = serde_json::from_value::<Vec<Content>>(body.clone()) {
-            return Ok(items.iter().map(entry_from).collect());
+            return Ok(items.iter().map(|item| entry_from(item, writable)).collect());
         }
         let item: Content = serde_json::from_value(body).map_err(|e| Error::malformed("contents", e.to_string()))?;
-        Ok(vec![entry_from(&item)])
+        Ok(vec![entry_from(&item, writable)])
     }
 
     fn shared_with_me(&self) -> Result<Vec<Entry>> {
@@ -272,7 +314,7 @@ impl Files for Git {
     fn stat(&self, id: &str) -> Result<Entry> {
         let url = self.contents_get_url(id)?;
         let item: Content = self.get(&url)?.json().map_err(|e| Error::malformed("file", e.to_string()))?;
-        Ok(entry_from(&item))
+        Ok(entry_from(&item, self.may_push()))
     }
 }
 
@@ -302,7 +344,9 @@ impl Git {
         let written: serde_json::Value = status(response)?.json().map_err(|e| Error::malformed("commit", e.to_string()))?;
         if let Some(content) = written.get("content") {
             let item: Content = serde_json::from_value(content.clone()).map_err(|e| Error::malformed("commit", e.to_string()))?;
-            return Ok(entry_from(&item));
+            // The push just succeeded, so this repository is writable to this
+            // token whatever a cached probe might have said.
+            return Ok(entry_from(&item, true));
         }
         Files::stat(self, path)
     }

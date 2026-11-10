@@ -311,7 +311,18 @@ impl App {
         let legacy = match self.provider_config().await {
             Some((config, _)) => {
                 let link = self.store.provider_link(user).await;
-                link.and_then(|link| provider_from(&config, &link.user, &link.password))
+                // Use the stored credential only against the provider it was
+                // issued for. A link whose bound address or kind no longer
+                // matches the deployment's is refused rather than sent on: that
+                // is what stops a changed address (or a record written straight
+                // to the bus) from re-pointing every app password at another
+                // host. An exact base match includes the scheme, so an
+                // `https://` credential is also withheld from an `http://`
+                // downgrade of the same host. An empty bound address is a record
+                // written before binding existed; refuse it and let the user
+                // relink rather than trust it for the rest of its 90-day life.
+                link.filter(|link| !link.base.is_empty() && link.base == config.base && (link.kind.is_empty() || link.kind == config.kind))
+                    .and_then(|link| provider_from(&config, &link.user, &link.password))
             }
             None => None,
         };

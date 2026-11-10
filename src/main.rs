@@ -39,6 +39,7 @@ mod pages;
 mod recipient;
 mod room;
 mod route;
+mod sealed;
 mod session;
 mod settings;
 mod state;
@@ -188,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if oidc.is_none() {
         tracing::warn!("no identity provider configured: every API route will refuse");
     }
-    let store = store::Store::new(&valkey_url, PREFIX_SERVICE)?;
+    let store = store::Store::new(&valkey_url, PREFIX_SERVICE)?.sealing_with(&secret_bytes);
     let web_root = std::env::var("COLLABCRAFT_WEB_ROOT").unwrap_or_default();
     // Read once. A directory listing per request would be a disk hit on every
     // asset, and the set only changes on deploy.
@@ -291,6 +292,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/unlink", axum::routing::post(pages::unlink))
         .route("/account/connection/default", axum::routing::post(pages::connection_default))
         .route("/account/signout", axum::routing::post(pages::signout))
+        // Where a desktop sign-in is approved by its user code.
+        .route("/device", axum::routing::get(auth::device_page).post(auth::device_approve))
         .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save))
         .route("/settings/apps", axum::routing::get(pages::apps).post(pages::apps_save));
 
@@ -304,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/auth", auth_routes)
         // Where a keyed link lands. A real route, so it wins over the static
         // fallback below.
-        .route("/invite/{key}", axum::routing::get(recipient::land))
+        .route("/invite/{key}", axum::routing::get(recipient::offer).post(recipient::open))
         .route("/esign/invite/{key}", axum::routing::get(esign::land_signer))
         .fallback(api::web)
         .with_state(app_state);
@@ -447,7 +450,7 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
 }
 
 async fn on_submit(socket: SocketRef, Data(msg): Data<SubmitMsg>, State(relay): State<Arc<Relay>>) {
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     // Arbitrate BEFORE taking a sequence number. INCR is not refundable, so a
@@ -563,7 +566,7 @@ impl<'a> OpMsg<'a> {
 }
 
 async fn on_lock(socket: SocketRef, Data(msg): Data<ScopeMsg>, State(relay): State<Arc<Relay>>) {
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     if !claims.may_edit() {
@@ -603,7 +606,7 @@ async fn on_lock(socket: SocketRef, Data(msg): Data<ScopeMsg>, State(relay): Sta
 }
 
 async fn on_unlock(socket: SocketRef, Data(msg): Data<ScopeMsg>, State(relay): State<Arc<Relay>>) {
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     let released = {
@@ -623,7 +626,7 @@ async fn on_unlock(socket: SocketRef, Data(msg): Data<ScopeMsg>, State(relay): S
 }
 
 async fn on_resync(socket: SocketRef, Data(msg): Data<ResyncMsg>, State(relay): State<Arc<Relay>>) {
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     let replay = {
@@ -659,7 +662,7 @@ async fn on_resync(socket: SocketRef, Data(msg): Data<ResyncMsg>, State(relay): 
 async fn on_frame(socket: SocketRef, Data(msg): Data<FrameMsg>) {
     // No relay state: a frame is neither sequenced nor stored, so there is nothing to reach
     // for. Every other handler takes it, and taking it here would suggest otherwise.
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     if !claims.may_edit() {
@@ -681,7 +684,7 @@ async fn on_frame(socket: SocketRef, Data(msg): Data<FrameMsg>) {
 /// is kept so a joining peer can be told where everybody is, and nothing here takes a sequence
 /// number: ordering ephemeral state would make a stale camera wait behind an edit.
 async fn on_ephemeral(socket: SocketRef, Data(msg): Data<EphemeralMsg>, State(relay): State<Arc<Relay>>) {
-    let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    let Some(claims) = live_claims(&socket) else { return };
     let room_name = claims.room();
 
     let remembered = {
@@ -739,4 +742,26 @@ async fn on_disconnect(socket: SocketRef, State(relay): State<Arc<Relay>>) {
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// The socket's claims, but only while its token still stands.
+///
+/// Authorisation is decided once, at connect, and cached on the socket. That
+/// alone would let a withdrawn or downgraded share keep editing for as long as
+/// the socket stays open, which has no bound. Re-reading expiry on every
+/// message that changes the document bounds it to the token's own lifetime:
+/// once the token lapses the peer is dropped and has to fetch another, and
+/// minting one re-stats the provider and re-decides the grant. A client that
+/// refreshes its token before then sees no interruption. Disconnecting is safe
+/// from a handler, because `on_disconnect` releases every scope the peer held.
+fn live_claims(socket: &SocketRef) -> Option<Claims> {
+    let claims = socket.extensions.get::<Claims>()?;
+    if claims.exp <= now_unix() {
+        tracing::info!(room = %claims.rm, "a socket's token expired; dropping it so it must re-authorise");
+        // `disconnect` consumes the handle, and this one is borrowed. The handle
+        // is a cheap clonable reference to the same socket, so a clone drops it.
+        let _ = socket.clone().disconnect();
+        return None;
+    }
+    Some(claims)
 }

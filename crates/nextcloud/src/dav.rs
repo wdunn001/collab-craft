@@ -43,6 +43,35 @@ pub struct Entry {
     pub etag: String,
     /// Nextcloud's own stable file id, which survives a rename. Empty when the server omits it.
     pub file_id: String,
+    /// The server's own `oc:permissions`, a string of letters. Empty when the
+    /// server omits the property. This is what a read-only share is reported
+    /// by, so it must be carried rather than dropped: without it every entry
+    /// looks writable. See [`Entry::writable`].
+    pub permissions: String,
+}
+
+impl Entry {
+    /// Whether this entry may be written, read from the server's own
+    /// `oc:permissions`.
+    ///
+    /// Nextcloud spells the grant in letters. A file carries `W` when its
+    /// content may be written; a folder carries `C` or `K` when children may
+    /// be created in it. A read-only share carries neither, which is the whole
+    /// point: it is how the server says "view, not edit".
+    ///
+    /// `None` when the server sent no permissions string at all, so the caller
+    /// can keep whatever default it had rather than refuse a write on a server
+    /// that simply does not report the property.
+    pub fn writable(&self) -> Option<bool> {
+        if self.permissions.is_empty() {
+            return None;
+        }
+        Some(if self.is_dir {
+            self.permissions.contains('C') || self.permissions.contains('K')
+        } else {
+            self.permissions.contains('W')
+        })
+    }
 }
 
 /// Bytes returned from a ranged GET together with optional total size / etag.
@@ -181,13 +210,36 @@ impl<'a> Files<'a> {
     /// `if_match` carries an etag from a previous read. Passing one turns the write into a
     /// compare-and-set, which is how a save avoids clobbering someone else's change. Passing
     /// `None` overwrites unconditionally.
-    pub fn put<H: Http>(&self, http: &H, path: &str, bytes: Vec<u8>, if_match: Option<&str>) -> Result<()> {
+    ///
+    /// Returns the etag the server assigned to the bytes just written, read from the PUT
+    /// response (`OC-ETag`, or plain `ETag`). That is the version of *this* write. Reading it
+    /// from a later `PROPFIND` would borrow whatever version exists then, which is a different
+    /// write entirely when somebody else saved in between. `None` when the server sent no etag
+    /// on the PUT, which a caller treats as "unknown" rather than trusting a stale one.
+    pub fn put<H: Http>(&self, http: &H, path: &str, bytes: Vec<u8>, if_match: Option<&str>) -> Result<Option<String>> {
         let mut req = self.account.request(Method::Put, self.url(path)?).header("content-type", "application/octet-stream").body(bytes);
         if let Some(etag) = if_match {
             req = req.header("if-match", quoted(etag));
         }
-        send(http, req)?;
-        Ok(())
+        let resp = send(http, req)?;
+        Ok(put_etag(&resp))
+    }
+
+    /// Create a file, refusing to replace one that already exists.
+    ///
+    /// `If-None-Match: *` is the precondition that makes this a create rather than an
+    /// overwrite: a server honouring RFC 7232 answers `412 Precondition Failed` when the name
+    /// is taken, so a "Save As" onto a colleague's file fails instead of silently replacing
+    /// their document. Returns the new file's etag the same way [`Files::put`] does.
+    pub fn create<H: Http>(&self, http: &H, path: &str, bytes: Vec<u8>) -> Result<Option<String>> {
+        let req = self
+            .account
+            .request(Method::Put, self.url(path)?)
+            .header("content-type", "application/octet-stream")
+            .header("if-none-match", "*")
+            .body(bytes);
+        let resp = send(http, req)?;
+        Ok(put_etag(&resp))
     }
 
     /// Create a folder. Fails when the parent is missing, which WebDAV reports as 409.
@@ -283,6 +335,7 @@ fn entry_from(group: &xml::Group, href: &str, files_root: &str) -> Entry {
         modified: group.get("getlastmodified").unwrap_or_default().to_owned(),
         etag: group.get("getetag").map(unquote).unwrap_or_default(),
         file_id: group.get("fileid").unwrap_or_default().to_owned(),
+        permissions: group.get("permissions").unwrap_or_default().to_owned(),
     }
 }
 
@@ -333,6 +386,15 @@ fn hex_val(byte: u8) -> Option<u8> {
     }
 }
 
+/// The etag a PUT response carries for the bytes just written.
+///
+/// Nextcloud and ownCloud return `OC-ETag`; a plain WebDAV server returns `ETag`. Either is the
+/// version of this write, so a save can hold it as its next compare-and-set baseline without a
+/// follow-up request that might read a newer version.
+fn put_etag(resp: &crate::http::Response) -> Option<String> {
+    resp.get_header("oc-etag").or_else(|| resp.get_header("etag")).map(unquote).filter(|e| !e.is_empty())
+}
+
 /// Strip the quotes and any weak marker from an etag.
 fn unquote(etag: &str) -> String {
     etag.trim().trim_start_matches("W/").trim_matches('"').to_owned()
@@ -341,4 +403,40 @@ fn unquote(etag: &str) -> String {
 /// Put quotes back on for an `If-Match`, unless the caller already did.
 fn quoted(etag: &str) -> String {
     if etag.starts_with('"') || etag.starts_with("W/") { etag.to_owned() } else { format!("\"{etag}\"") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(permissions: &str) -> Entry {
+        Entry { is_dir: false, permissions: permissions.to_owned(), ..Entry::default() }
+    }
+
+    fn folder(permissions: &str) -> Entry {
+        Entry { is_dir: true, permissions: permissions.to_owned(), ..Entry::default() }
+    }
+
+    #[test]
+    fn a_file_is_writable_only_with_the_write_bit() {
+        // Nextcloud's own letters. A read-write file in your own root.
+        assert_eq!(file("RGDNVW").writable(), Some(true));
+        // A read-only share: shared, readable, nothing more. This is the case
+        // that used to mint an edit token.
+        assert_eq!(file("SG").writable(), Some(false));
+        assert_eq!(file("G").writable(), Some(false));
+    }
+
+    #[test]
+    fn a_folder_is_writable_when_children_can_be_created() {
+        assert_eq!(folder("RGDNVCK").writable(), Some(true));
+        assert_eq!(folder("SG").writable(), Some(false));
+    }
+
+    #[test]
+    fn no_permissions_string_means_unknown() {
+        // A server that never sent the property. The caller keeps its default
+        // rather than refusing a write it has no reason to refuse.
+        assert_eq!(file("").writable(), None);
+    }
 }

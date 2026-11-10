@@ -238,25 +238,37 @@ impl Oidc {
     }
 
     /// Where to send a browser to sign in.
-    pub fn authorize_url(&self, state: &str) -> String {
+    ///
+    /// Carries a PKCE challenge, so the authorization code the provider issues
+    /// is bound to the `verifier` this flow minted. A code intercepted or
+    /// replayed without that verifier is refused at the token endpoint, which
+    /// is what stops a stolen code from being exchanged by anyone but the
+    /// client that started the flow.
+    pub fn authorize_url(&self, state: &str, challenge: &str) -> String {
         format!(
-            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
             self.discovery.authorization_endpoint,
             urlencode(&self.client_id),
             urlencode(&self.redirect_uri),
             urlencode("openid profile email groups"),
             urlencode(state),
+            urlencode(challenge),
         )
     }
 
     /// Exchange the code a browser came back with for the user's claims.
-    pub async fn exchange(&self, http: &reqwest::Client, code: &str) -> Result<Session, String> {
+    ///
+    /// `verifier` is the PKCE secret stored with the flow's state. The provider
+    /// recomputes the challenge from it and refuses a code that was minted
+    /// under a different one.
+    pub async fn exchange(&self, http: &reqwest::Client, code: &str, verifier: &str) -> Result<Session, String> {
         let form = [
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", self.redirect_uri.as_str()),
             ("client_id", self.client_id.as_str()),
             ("client_secret", self.client_secret.as_str()),
+            ("code_verifier", verifier),
         ];
         let token: serde_json::Value =
             http.post(&self.discovery.token_endpoint).form(&form).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
@@ -303,6 +315,24 @@ pub fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The PKCE S256 challenge for a verifier: base64url(sha256(verifier)).
+pub fn pkce_challenge(verifier: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// The scheme-and-host origin of an absolute URL, with no path.
+///
+/// Used to point a desktop sign-in at this service's own confirmation page
+/// without a second configuration value: the OIDC redirect URI is already an
+/// absolute URL on this origin.
+pub fn origin_of(url: &str) -> Option<String> {
+    let rest = url.find("://").map(|i| i + 3)?;
+    let end = url[rest..].find('/').map(|j| rest + j).unwrap_or(url.len());
+    Some(url[..end].to_owned())
 }
 
 /// An opaque random identifier, for session ids and CSRF state.

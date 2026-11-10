@@ -149,6 +149,12 @@ fn lift(e: Error) -> CloudError {
 }
 
 fn entry_from(e: craft_nextcloud::Entry) -> CloudEntry {
+    // Read the grant from the server's own `oc:permissions` where it reports
+    // one. A plain WebDAV server (RFC 4918 has no writability property) sends
+    // none, `writable()` answers `None`, and the default stands. A server that
+    // does report (ownCloud Infinite Scale, SabreDAV with the ownCloud plugin)
+    // is honoured rather than assumed writable.
+    let writable = e.writable().unwrap_or(true);
     CloudEntry {
         id: e.path.clone(),
         // A server reporting a file id (ownCloud Infinite Scale, SabreDAV with
@@ -162,7 +168,7 @@ fn entry_from(e: craft_nextcloud::Entry) -> CloudEntry {
         modified: (!e.modified.is_empty()).then_some(e.modified),
         mime: (!e.content_type.is_empty()).then_some(e.content_type),
         etag: (!e.etag.is_empty()).then_some(e.etag),
-        writable: true,
+        writable,
         shared_by: None,
     }
 }
@@ -190,14 +196,27 @@ impl<H: Http> craft_cloud::Files for WebDav<H> {
     }
 
     fn write(&self, id: &str, bytes: &[u8], if_match: Option<&str>) -> CloudResult<CloudEntry> {
-        self.files().put(&self.http, id, bytes.to_vec(), if_match).map_err(lift)?;
-        craft_cloud::Files::stat(self, id)
+        // Return the version the PUT wrote, not a later stat's: a save holds
+        // this etag as its next compare-and-set baseline, and a racing writer's
+        // version borrowed here is how one save silently overwrites another.
+        let put_etag = self.files().put(&self.http, id, bytes.to_vec(), if_match).map_err(lift)?;
+        let mut entry = craft_cloud::Files::stat(self, id)?;
+        if put_etag.is_some() {
+            entry.etag = put_etag;
+        }
+        Ok(entry)
     }
 
     fn create(&self, folder: &str, name: &str, bytes: &[u8]) -> CloudResult<CloudEntry> {
         let path = format!("{}/{}", folder.trim_end_matches('/'), name);
-        self.files().put(&self.http, &path, bytes.to_vec(), None).map_err(lift)?;
-        craft_cloud::Files::stat(self, &path)
+        // Refuse to replace an existing name, so a "Save As" cannot overwrite a
+        // file somebody else already put there.
+        let put_etag = self.files().create(&self.http, &path, bytes.to_vec()).map_err(lift)?;
+        let mut entry = craft_cloud::Files::stat(self, &path)?;
+        if put_etag.is_some() {
+            entry.etag = put_etag;
+        }
+        Ok(entry)
     }
 
     fn stat(&self, id: &str) -> CloudResult<CloudEntry> {

@@ -83,6 +83,18 @@ struct File {
     modified: Option<String>,
     #[serde(rename = "md5Checksum", default)]
     etag: Option<String>,
+    #[serde(default)]
+    capabilities: Option<Caps>,
+}
+
+/// What this account may do with the file, from Drive's own `capabilities`.
+///
+/// Requested in the field mask. A file shared with you as a reader reports
+/// `canEdit: false`, which is the signal a read-only share is distinguished by.
+#[derive(Deserialize)]
+struct Caps {
+    #[serde(rename = "canEdit", default)]
+    can_edit: Option<bool>,
 }
 
 fn status(response: reqwest::blocking::Response) -> Result<reqwest::blocking::Response> {
@@ -107,24 +119,30 @@ fn entry(file: File) -> Entry {
         modified: file.modified,
         mime: if folder { None } else { Some(file.mime_type) },
         etag: file.etag,
-        writable: true,
+        // Drive answers `capabilities.canEdit` whenever the mask asks for it, so
+        // its absence means a malformed or truncated response rather than a
+        // server with no permission concept. Default to not-writable there: a
+        // read-only share must never fall through to an edit grant.
+        writable: file.capabilities.and_then(|c| c.can_edit).unwrap_or(false),
         shared_by: None,
     }
 }
 
-const FIELDS: &str = "files(id,name,mimeType,size,modifiedTime,md5Checksum)";
+/// The file fields every call asks for. `capabilities(canEdit)` is what a
+/// read-only share is told apart by; without it every entry looked writable.
+const FILE_FIELDS: &str = "id,name,mimeType,size,modifiedTime,md5Checksum,capabilities(canEdit)";
 
 impl Files for Drive {
     fn list(&self, path: &str) -> Result<Vec<Entry>> {
         let parent = if path.is_empty() || path == "/" { "root" } else { path };
         let query = format!("'{parent}' in parents and trashed=false");
-        let url = format!("{DRIVE}/files?q={}&fields={FIELDS}&pageSize=200", urlencoding(&query));
+        let url = format!("{DRIVE}/files?q={}&fields=files({FILE_FIELDS})&pageSize=200", urlencoding(&query));
         let list: FileList = self.get(&url)?.json().map_err(|e| Error::malformed("files", e.to_string()))?;
         Ok(list.files.into_iter().map(entry).collect())
     }
 
     fn shared_with_me(&self) -> Result<Vec<Entry>> {
-        let url = format!("{DRIVE}/files?q={}&fields={FIELDS}&pageSize=200", urlencoding("sharedWithMe and trashed=false"));
+        let url = format!("{DRIVE}/files?q={}&fields=files({FILE_FIELDS})&pageSize=200", urlencoding("sharedWithMe and trashed=false"));
         let list: FileList = self.get(&url)?.json().map_err(|e| Error::malformed("files", e.to_string()))?;
         Ok(list.files.into_iter().map(entry).collect())
     }
@@ -136,7 +154,7 @@ impl Files for Drive {
 
     fn write(&self, id: &str, bytes: &[u8], _if_match: Option<&str>) -> Result<Entry> {
         let token = self.token()?;
-        let url = format!("{UPLOAD}/files/{}?uploadType=media", enc_id(id));
+        let url = format!("{UPLOAD}/files/{}?uploadType=media&fields={FILE_FIELDS}", enc_id(id));
         let response = reqwest::blocking::Client::new()
             .patch(url)
             .bearer_auth(token)
@@ -162,7 +180,7 @@ impl Files for Drive {
         body.extend(bytes);
         body.extend(format!("\r\n--{boundary}--").into_bytes());
         let response = reqwest::blocking::Client::new()
-            .post(format!("{UPLOAD}/files?uploadType=multipart"))
+            .post(format!("{UPLOAD}/files?uploadType=multipart&fields={FILE_FIELDS}"))
             .bearer_auth(token)
             .header("Content-Type", format!("multipart/related; boundary={boundary}"))
             .body(body)
@@ -173,7 +191,7 @@ impl Files for Drive {
     }
 
     fn stat(&self, id: &str) -> Result<Entry> {
-        let url = format!("{DRIVE}/files/{}?fields=id,name,mimeType,size,modifiedTime,md5Checksum", enc_id(id));
+        let url = format!("{DRIVE}/files/{}?fields={FILE_FIELDS}", enc_id(id));
         let file: File = self.get(&url)?.json().map_err(|e| Error::malformed("file", e.to_string()))?;
         Ok(entry(file))
     }

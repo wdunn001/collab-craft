@@ -520,7 +520,6 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, headers: Heade
                 share: share.id.clone(),
                 exp,
                 max_uses: app.keyed.max_uses,
-                invite_url: Some(invite_url.clone()),
             };
             if !app.store.put_keyed_link(&key.handle, &link, app.keyed.ttl_secs).await {
                 placed.failed.push(ShareFailure {
@@ -598,7 +597,7 @@ fn header_text(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<Stri
     headers.get(name)?.to_str().ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
         let (k, v) = part.split_once('=')?;
@@ -750,24 +749,18 @@ pub async fn shares(State(app): State<Arc<App>>, session: Session, Query(q): Que
     let id = q.id.clone();
     let listed = tokio::task::spawn_blocking(move || p.shares(&id)).await;
     match listed {
-        Ok(Ok(mut shares)) => {
-            // The dialog's "Copy link" reads this list after a grant. Replace
-            // provider storage-manager URLs with the CollabCraft invite that
-            // was minted for the same share, when one still exists.
-            for share in &mut shares {
-                if let Some(url) = invite_url_for_share(&app, &share.id).await {
-                    share.url = Some(url);
-                }
-            }
+        Ok(Ok(shares)) => {
+            // The invite link carries a one-time secret. It is handed to the
+            // sharer once, in the response to the request that minted it, and is
+            // never stored or shown again: re-displaying it here would mean
+            // keeping the secret at rest, which is the one thing the keyed-link
+            // design refuses to do. A keyed share therefore shows the provider's
+            // own URL, not a working invite.
             Json(shares).into_response()
         }
         Ok(Err(e)) => fail(e),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
-}
-
-async fn invite_url_for_share(app: &App, share_id: &str) -> Option<String> {
-    app.store.keyed_links_for_share(share_id).await.into_iter().find_map(|link| link.invite_url)
 }
 
 /// Withdraw one share.
@@ -831,6 +824,32 @@ pub async fn token(State(app): State<Arc<App>>, session: Session, Query(q): Quer
 
 // ---- serving the browser builds -------------------------------------------
 
+/// Percent-decode a path the lenient way, so the entitlement gate reads a URL
+/// the same way the file server will.
+///
+/// An invalid escape is left as written rather than dropped: the point is to
+/// match what ServeDir resolves, and refusing a stray `%` would only disagree
+/// with it. This is a gate input, never a filesystem path, so traversal is not
+/// this function's job; ServeDir rejects `..` itself.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Serve a browser build, if this user is entitled to that app.
 ///
 /// The first path segment is the app. `/gridcraft/index.html` is GridCraft, and
@@ -842,7 +861,12 @@ pub async fn token(State(app): State<Arc<App>>, session: Session, Query(q): Quer
 /// assets and the index have nothing to gate.
 pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axum::extract::Request) -> Response {
     let path = req.uri().path().trim_start_matches('/').to_owned();
-    let first = path.split('/').next().unwrap_or_default().to_owned();
+    // Gate on the DECODED first segment. ServeDir percent-decodes a path before
+    // it resolves a file, so `/%67ridcraft/index.html` reaches the disk as
+    // `gridcraft/index.html`. A gate that read the raw segment would see
+    // `%67ridcraft`, find no app by that name and wave through the one request
+    // it exists to stop. Decoding here makes the check see what gets served.
+    let first = percent_decode(&path).split('/').next().unwrap_or_default().to_owned();
 
     if app.is_app(&first) {
         let Some(session) = session else {
@@ -936,5 +960,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::COOKIE, HeaderValue::from_static("collabcraft_session=abc; collabcraft_app=deckcraft"));
         assert_eq!(cookie_value(&headers, crate::session::APP_COOKIE).as_deref(), Some("deckcraft"));
+    }
+
+    #[test]
+    fn an_encoded_app_segment_decodes_to_the_same_app() {
+        // The entitlement gate must see the app ServeDir will serve. A segment
+        // smuggled in as `%67ridcraft` has to read back as `gridcraft`, or the
+        // gate waves through the page it exists to hold back.
+        let first = |p: &str| percent_decode(p.trim_start_matches('/')).split('/').next().unwrap_or_default().to_owned();
+        assert_eq!(first("/gridcraft/index.html"), "gridcraft");
+        assert_eq!(first("/%67ridcraft/index.html"), "gridcraft");
+        assert_eq!(first("/%67%72%69%64craft/index.html"), "gridcraft");
+        // A stray percent is left as written rather than eating the segment.
+        assert_eq!(first("/grid%craft/index.html"), "grid%craft");
     }
 }
