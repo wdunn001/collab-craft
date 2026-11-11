@@ -147,6 +147,13 @@ pub struct Room {
     /// Sequence of `history[0]`, so a resync knows how far back it can reach.
     first_in_history: u64,
     peers: Vec<Peer>,
+    /// peer id -> how many live connections hold it.
+    ///
+    /// A client that reconnects reuses its token, so the same peer id opens a
+    /// second socket before the first is reaped. Keyed on the peer id rather
+    /// than the socket, a peer stays in the room while any connection holds it,
+    /// and the old socket's disconnect cannot evict the live one.
+    conns: HashMap<String, usize>,
     /// scope -> holder.
     locks: HashMap<String, String>,
     /// Bytes of `params` currently held in [`Room::history`].
@@ -190,16 +197,18 @@ impl Room {
         self.locks.get(scope).map(String::as_str)
     }
 
-    /// Add a peer, replacing any earlier connection with the same id.
+    /// Add a peer, or a second connection for one already here.
     ///
-    /// Replacing rather than rejecting matters on a reconnect: the old socket
-    /// may not have been reaped yet, and refusing the new one would lock the
-    /// user out of their own document until a timeout.
+    /// A reconnect opens a new socket under the same peer id before the old one
+    /// is reaped. That counts as a second connection rather than a replacement,
+    /// so the peer survives the old socket's later disconnect. The roster entry
+    /// is refreshed to the newest connection's display and edit right.
     pub fn join(&mut self, peer: Peer) -> Result<(), Refusal> {
-        let replacing = self.peers.iter().any(|p| p.peer == peer.peer);
-        if !replacing && self.peers.len() >= MAX_PEERS {
+        let already = self.peers.iter().any(|p| p.peer == peer.peer);
+        if !already && self.peers.len() >= MAX_PEERS {
             return Err(Refusal::Full);
         }
+        *self.conns.entry(peer.peer.clone()).or_insert(0) += 1;
         self.peers.retain(|p| p.peer != peer.peer);
         self.peers.push(peer);
         Ok(())
@@ -243,11 +252,27 @@ impl Room {
         Ok(())
     }
 
-    /// Remove a peer and drop every scope it held.
+    /// Drop one of a peer's connections, and everything it held once the last
+    /// one goes.
     ///
     /// Releasing on disconnect is the whole reason a lock is safe to take. A
-    /// lock that outlived its holder would wedge the region until a restart.
+    /// lock that outlived its holder would wedge the region until a restart. But
+    /// a peer with a live reconnect still holds its scope, so the roster entry,
+    /// its ephemeral state and its locks are released only when the last
+    /// connection leaves. An old socket's disconnect decrements the count and
+    /// returns nothing.
     pub fn leave(&mut self, peer_id: &str) -> Vec<String> {
+        match self.conns.get_mut(peer_id) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                return Vec::new();
+            }
+            Some(_) => {
+                self.conns.remove(peer_id);
+            }
+            // No tracked connection. Fall through and clean up defensively.
+            None => {}
+        }
         self.peers.retain(|p| p.peer != peer_id);
         // Their camera and selection go with them. A marker left behind would show somebody
         // looking at a part they are no longer in.
@@ -392,4 +417,49 @@ impl Room {
 /// the socket.
 fn value_bytes(value: &serde_json::Value) -> usize {
     serde_json::to_vec(value).map_or(0, |v| v.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(id: &str) -> Peer {
+        Peer { peer: id.to_owned(), display: id.to_owned(), may_edit: true }
+    }
+
+    #[test]
+    fn an_old_socket_disconnect_keeps_a_live_reconnect() {
+        // A client reconnects under the same peer id before its first socket is
+        // reaped. The old socket's later disconnect must not evict the live peer
+        // or hand its lock to somebody else.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap(); // socket A
+        r.join(peer("bob")).unwrap();
+        r.join(peer("alice")).unwrap(); // socket B, same id, A not yet reaped
+        r.record_lock("alice", "B2".to_owned()); // held by the live connection
+
+        let dropped = r.leave("alice"); // socket A disconnects
+        let roster: Vec<&str> = r.peers().iter().map(|p| p.peer.as_str()).collect();
+        assert!(roster.contains(&"alice"), "the live reconnect must stay: roster={roster:?}");
+        assert_eq!(r.holder_of("B2"), Some("alice"), "its lock must not be handed away");
+        assert!(dropped.is_empty(), "an old socket's close releases nothing");
+
+        // The live socket's own disconnect does release everything.
+        let dropped = r.leave("alice");
+        assert_eq!(dropped, vec!["B2".to_owned()]);
+        assert!(!r.peers().iter().any(|p| p.peer == "alice"), "the last connection leaving removes the peer");
+    }
+
+    #[test]
+    fn a_reopened_room_seeds_its_sequence_from_the_bus() {
+        // A fresh room starts at zero. On reopen the bus still holds where the
+        // document was, and observe_seq raises the room to it so the next op is
+        // in order rather than a replay the client silently drops.
+        let mut r = Room::default();
+        assert_eq!(r.seq(), 0);
+        r.observe_seq(42);
+        assert_eq!(r.seq(), 42, "the room must not hand out a sequence number already seen");
+        r.observe_seq(10);
+        assert_eq!(r.seq(), 42, "a stale read never pushes the counter backwards");
+    }
 }
