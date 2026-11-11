@@ -38,6 +38,14 @@ pub const MAX_PEERS: usize = 256;
 /// rather than left believing the file plus the replay is the whole text.
 pub const TEXT_BYTES: usize = 2 * 1024 * 1024;
 
+/// Scopes one document may retain CRDT operations for.
+///
+/// [`TEXT_BYTES`] bounds the bytes within one scope and says nothing about how
+/// many scopes there are. A client naming a fresh scope on every edit would
+/// otherwise grow a room without limit, one bounded log at a time. A real
+/// document has a scope per editable unit, far below this.
+pub const MAX_SCOPES: usize = 4096;
+
 /// Latest-wins values one peer may hold at once.
 ///
 /// A camera and a selection are two kinds. An unbounded set would let one peer grow the room
@@ -170,6 +178,13 @@ pub struct Room {
     history: Vec<Op>,
     /// Sequence of `history[0]`, so a resync knows how far back it can reach.
     first_in_history: u64,
+    /// The sequence the saved file reflects, learned from a client's save.
+    ///
+    /// A joiner loads the file at this version, so it is the baseline the relay
+    /// catches a joiner up from: the file plus every op after this is the
+    /// current document. Zero until the first save, which is correct, because
+    /// before any save the file a joiner loads is the original.
+    saved_seq: u64,
     peers: Vec<Peer>,
     /// peer id -> how many live connections hold it.
     ///
@@ -374,6 +389,13 @@ impl Room {
             return;
         };
         let bytes: usize = ops.iter().map(value_bytes).sum();
+        // A fresh scope past the cap is dropped rather than retained. The edit
+        // still orders and broadcasts through the op history; what is refused is
+        // only the per-scope replay buffer, so a room cannot be grown without
+        // limit by inventing scope names.
+        if !self.texts.contains_key(scope) && self.texts.len() >= MAX_SCOPES {
+            return;
+        }
         let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), seqs: Vec::new(), bytes: 0, complete: true });
         if log.bytes + bytes > TEXT_BYTES {
             // Dropping the oldest would leave a replay that cannot be applied, because later
@@ -399,9 +421,18 @@ impl Room {
     /// then receives only the operations after the save, rather than replaying
     /// text the file already contains and seeing it twice.
     pub fn checkpoint(&mut self, seq: u64) {
+        self.saved_seq = self.saved_seq.max(seq);
         for log in self.texts.values_mut() {
             log.drop_through(seq);
         }
+    }
+
+    /// The sequence the saved file reflects. See [`Room::saved_seq`] field.
+    ///
+    /// The relay joins a peer at this baseline and replays every op after it, so
+    /// the peer's file load plus the replay is the current document.
+    pub fn saved_seq(&self) -> u64 {
+        self.saved_seq
     }
 
     /// Record a grant the bus already made.
@@ -446,7 +477,20 @@ impl Room {
         if self.first_in_history == 0 || have + 1 < self.first_in_history {
             return None;
         }
-        Some(self.history.iter().filter(|op| op.seq > have).cloned().collect())
+        let ops: Vec<Op> = self.history.iter().filter(|op| op.seq > have).cloned().collect();
+        // The run has to be contiguous from `have + 1`. A hole means a sequence
+        // number was burned: allocated from the bus, then the submit refused
+        // when a lock landed in the race window. That number never arrives, so a
+        // peer replaying across the hole waits for it forever. Report the gap as
+        // unreplayable, which is the caller's cue to send a snapshot instead.
+        let mut expected = have + 1;
+        for op in &ops {
+            if op.seq != expected {
+                return None;
+            }
+            expected += 1;
+        }
+        Some(ops)
     }
 }
 
@@ -520,6 +564,74 @@ mod tests {
         // A save reflecting everything leaves nothing to replay.
         r.checkpoint(3);
         assert!(r.texts().get("/body/0").unwrap().ops().is_empty());
+    }
+
+    fn plain_sub(peer: &str) -> Submission {
+        Submission {
+            peer_id: peer.to_owned(),
+            may_edit: true,
+            command: "cell.set".to_owned(),
+            params: serde_json::json!({}),
+            scope: None,
+            local: None,
+        }
+    }
+
+    #[test]
+    fn since_reports_a_burned_sequence_hole() {
+        // Sequence 3 was burned: allocated, then its submit refused. The history
+        // holds 1, 2, 4. A replay from 2 cannot be a clean run, so `since`
+        // reports the gap rather than handing back [4] that strands a client
+        // waiting for 3.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        r.submit(1, plain_sub("alice")).unwrap();
+        r.submit(2, plain_sub("alice")).unwrap();
+        r.submit(4, plain_sub("alice")).unwrap();
+        assert_eq!(r.since(4), Some(Vec::new()), "nothing after the latest");
+        let contiguous = r.since(3).map(|ops| ops.iter().map(|o| o.seq).collect::<Vec<_>>());
+        assert_eq!(contiguous, Some(vec![4]), "a run with no hole still replays");
+        assert_eq!(r.since(2), None, "a hole at 3 is unreplayable");
+    }
+
+    #[test]
+    fn the_join_baseline_follows_the_save() {
+        // A save moves the baseline the relay catches a joiner up from. Before a
+        // save it is zero, so a joiner replays from the top of the history. After
+        // a save it is the saved sequence, so only the later ops replay.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        r.submit(1, plain_sub("alice")).unwrap();
+        r.submit(2, plain_sub("alice")).unwrap();
+        assert_eq!(r.saved_seq(), 0);
+        let from_top = r.since(r.saved_seq()).map(|ops| ops.iter().map(|o| o.seq).collect::<Vec<_>>());
+        assert_eq!(from_top, Some(vec![1, 2]), "with no save, a joiner replays every op");
+
+        r.submit(3, plain_sub("alice")).unwrap();
+        r.checkpoint(2);
+        assert_eq!(r.saved_seq(), 2);
+        let after_save = r.since(r.saved_seq()).map(|ops| ops.iter().map(|o| o.seq).collect::<Vec<_>>());
+        assert_eq!(after_save, Some(vec![3]), "after a save, only the later ops replay");
+    }
+
+    #[test]
+    fn retained_scopes_are_bounded() {
+        // One editor naming a fresh scope on every edit cannot grow the room
+        // without limit. Past the cap, a new scope's replay buffer is dropped.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        for i in 0..(MAX_SCOPES + 10) {
+            let sub = Submission {
+                peer_id: "alice".to_owned(),
+                may_edit: true,
+                command: "crdt.text".to_owned(),
+                params: serde_json::json!({ "scope": format!("/s/{i}"), "ops": [{ "op": "x" }] }),
+                scope: None,
+                local: None,
+            };
+            r.submit((i + 1) as u64, sub).unwrap();
+        }
+        assert_eq!(r.texts().len(), MAX_SCOPES, "the scope count is capped");
     }
 
     #[test]

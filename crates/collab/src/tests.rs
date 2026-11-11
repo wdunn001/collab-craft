@@ -49,6 +49,17 @@ fn joining_records_identity_sequence_and_roster() {
 }
 
 #[test]
+fn a_remote_lock_announced_to_the_room_is_recorded() {
+    // An existing peer learns of another peer's grant, so an edit into that
+    // region is held back here rather than optimistically sent and refused.
+    let mut s = session();
+    let out = s.handle(ServerMsg::PresenceLock { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "bob".to_owned() });
+    assert_eq!(s.blocked_by("B2"), Some("bob"), "an existing peer must learn of the new lock");
+    assert!(!s.may_edit("B2"));
+    assert!(out.iter().any(|e| matches!(e, Effect::RemoteLocks { .. })));
+}
+
+#[test]
 fn saved_reports_the_sequence_the_client_has_applied() {
     let mut s = Session::new(DOC);
     s.handle(joined(17));
@@ -375,6 +386,7 @@ fn server_messages_round_trip() {
         ServerMsg::LockGranted { doc: DOC.to_owned(), scope: "B2".to_owned() },
         ServerMsg::LockDenied { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "bob".to_owned() },
         ServerMsg::LockReleased { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ServerMsg::PresenceLock { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "other".to_owned() },
         ServerMsg::Presence { doc: DOC.to_owned(), roster: Vec::new() },
         ServerMsg::Snapshot { doc: DOC.to_owned(), seq: 9, document: json!({}) },
         ServerMsg::Error { doc: DOC.to_owned(), detail: "x".to_owned() },
@@ -472,6 +484,7 @@ fn every_event_name_carries_exactly_one_server_message() {
         ServerMsg::LockGranted { doc: DOC.to_owned(), scope: "B2".to_owned() },
         ServerMsg::LockDenied { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "other".to_owned() },
         ServerMsg::LockReleased { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ServerMsg::PresenceLock { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "other".to_owned() },
         ServerMsg::Presence { doc: DOC.to_owned(), roster: Vec::new() },
         ServerMsg::Snapshot { doc: DOC.to_owned(), seq: 9, document: json!({}) },
         ServerMsg::TextOps { doc: DOC.to_owned(), scope: "/body/0".to_owned(), ops: json!([]), complete: true },

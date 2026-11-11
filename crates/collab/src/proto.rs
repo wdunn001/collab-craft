@@ -194,6 +194,17 @@ pub enum ServerMsg {
         doc: DocId,
         scope: Scope,
     },
+    /// Somebody else in the room took a scope.
+    ///
+    /// The relay broadcasts this to the rest of the room when it grants a lock,
+    /// so a peer already here learns the region is busy before it edits into it.
+    /// Without a receiver, that peer edited optimistically and the relay refused
+    /// the edit it could have prevented.
+    PresenceLock {
+        doc: DocId,
+        scope: Scope,
+        holder: PeerId,
+    },
     /// The roster changed.
     Presence {
         doc: DocId,
@@ -224,6 +235,7 @@ impl ServerMsg {
             | ServerMsg::LockGranted { doc, .. }
             | ServerMsg::LockDenied { doc, .. }
             | ServerMsg::LockReleased { doc, .. }
+            | ServerMsg::PresenceLock { doc, .. }
             | ServerMsg::Presence { doc, .. }
             | ServerMsg::Snapshot { doc, .. }
             | ServerMsg::TextOps { doc, .. }

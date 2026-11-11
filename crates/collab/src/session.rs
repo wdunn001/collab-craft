@@ -276,6 +276,19 @@ impl Session {
                 vec![Effect::LockDropped { scope }]
             }
 
+            ServerMsg::PresenceLock { scope, holder, .. } => {
+                // Somebody else took the scope. Record it so an edit into that
+                // region is held back here rather than refused by the relay, and
+                // tell the app so it can show the region as busy.
+                if self.me.as_deref() == Some(holder.as_str()) {
+                    return Vec::new();
+                }
+                self.held.remove(&scope);
+                self.remote_locks.insert(scope, holder);
+                let locks = self.remote_locks.iter().map(|(scope, holder)| LockState { scope: scope.clone(), holder: holder.clone() }).collect();
+                vec![Effect::RemoteLocks { locks }]
+            }
+
             ServerMsg::Presence { roster, .. } => {
                 self.roster = roster.clone();
                 vec![Effect::Roster { roster }]

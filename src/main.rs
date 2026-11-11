@@ -428,15 +428,30 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
                 for (scope, holder) in &locks {
                     room.record_holder(scope.clone(), holder.clone());
                 }
-                let texts: Vec<(String, Vec<serde_json::Value>, bool)> =
-                    room.texts().iter().map(|(scope, log)| (scope.clone(), log.ops().to_vec(), log.complete())).collect();
-                Some((room.seq(), room.peers().to_vec(), texts, room.ephemeral()))
+                // Catch the joiner up from the version the file reflects, not the
+                // current sequence. The file it loads is at `saved_seq`, and the
+                // ops after that bring it current. Replaying them as ordered ops
+                // reuses the path a live edit already takes, so the joiner does
+                // not silently miss the edits made since the last save. When the
+                // history no longer reaches that baseline, or a burned sequence
+                // broke the run, there is nothing clean to replay, so the join
+                // falls back to the current sequence and the retained text: the
+                // joiner then leans on the file alone, the older behaviour.
+                let baseline = room.saved_seq();
+                match room.since(baseline) {
+                    Some(replay) => Some((baseline, replay, Vec::new(), room.peers().to_vec(), room.ephemeral())),
+                    None => {
+                        let texts: Vec<(String, Vec<serde_json::Value>, bool)> =
+                            room.texts().iter().map(|(scope, log)| (scope.clone(), log.ops().to_vec(), log.complete())).collect();
+                        Some((room.seq(), Vec::new(), texts, room.peers().to_vec(), room.ephemeral()))
+                    }
+                }
             }
             Err(_) => None,
         }
     };
 
-    let Some((seq, roster, texts, ephemeral)) = joined else {
+    let Some((seq, replay, texts, roster, ephemeral)) = joined else {
         tracing::warn!(room = %room_key, "refusing a peer: the document is full");
         let _ = socket.emit("error", &ErrorMsg { doc: room_name.clone(), detail: Refusal::Full.detail() });
         let _ = socket.disconnect();
@@ -455,9 +470,17 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
         },
     );
 
-    // Catch the new peer up on text. The file it is about to open is behind every edit made
-    // since that file was written, and the sequence is already past those edits, so they cannot
-    // be replayed as ordered ops. These carry no sequence for that reason.
+    // The ordered ops since the saved version. The joiner applies these on top
+    // of the file it loads, exactly as it would a live edit, so the edits made
+    // since the last save are not lost. Empty on the fallback path below.
+    for op in &replay {
+        let _ = socket.emit("op", &OpMsg::new(&claims, op));
+    }
+
+    // The fallback catch-up for text, used only when the ordered replay above
+    // could not be built. The file the joiner opens is behind the edits made
+    // since it was written, and the sequence is already past those edits, so
+    // these carry no sequence.
     for (scope, ops, complete) in texts {
         let _ = socket.emit("text_ops", &serde_json::json!({ "doc": room_name.clone(), "scope": scope, "ops": ops, "complete": complete }));
     }
