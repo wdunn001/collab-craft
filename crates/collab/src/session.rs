@@ -159,6 +159,17 @@ impl Session {
         ClientMsg::Lock { doc: self.doc.clone(), scope: scope.into() }
     }
 
+    /// The message to send after the document has been written to the file.
+    ///
+    /// It reports the sequence the save reflects, which is everything this
+    /// replica has applied in order. The relay then stops replaying the CRDT
+    /// operations the file already contains, so a late joiner that loads the
+    /// saved file does not apply them again and see a character twice. The app
+    /// calls this once a save to the provider has succeeded.
+    pub fn saved(&self) -> ClientMsg {
+        ClientMsg::Saved { doc: self.doc.clone(), seq: self.applied }
+    }
+
     /// Give a scope back. Dropping it locally is immediate, because a release cannot be refused.
     pub fn release_lock(&mut self, scope: impl Into<Scope>) -> ClientMsg {
         let scope = scope.into();

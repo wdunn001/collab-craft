@@ -71,6 +71,7 @@ pub fn emit(msg: &ClientMsg) -> (&'static str, serde_json::Value) {
         ClientMsg::Resync { have, .. } => ("resync", serde_json::json!({ "have": have })),
         ClientMsg::Frame { payload, .. } => ("frame", serde_json::json!({ "payload": payload })),
         ClientMsg::Ephemeral { kind, payload, .. } => ("ephemeral", serde_json::json!({ "kind": kind, "payload": payload })),
+        ClientMsg::Saved { seq, .. } => ("saved", serde_json::json!({ "seq": seq })),
     }
 }
 

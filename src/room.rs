@@ -108,6 +108,9 @@ impl Refusal {
 pub struct TextLog {
     /// The operations, oldest first, as the clients sent them.
     ops: Vec<serde_json::Value>,
+    /// The ordered sequence each op in [`TextLog::ops`] was assigned, so a save
+    /// can drop the ones it has baked into the file. Same length as `ops`.
+    seqs: Vec<u64>,
     bytes: usize,
     /// Whether everything since the file was opened is still here.
     complete: bool,
@@ -122,6 +125,27 @@ impl TextLog {
     /// Whether the text can be rebuilt from the file plus [`TextLog::ops`].
     pub fn complete(&self) -> bool {
         self.complete
+    }
+
+    /// Drop the operations a save has baked into the file.
+    ///
+    /// Everything ordered at or before `seq` is now in the saved file, so
+    /// replaying it to a joiner who loads that file would apply it a second
+    /// time. Only the operations after the save are kept.
+    fn drop_through(&mut self, seq: u64) {
+        let mut kept_ops = Vec::new();
+        let mut kept_seqs = Vec::new();
+        let mut bytes = 0;
+        for (op, op_seq) in self.ops.drain(..).zip(self.seqs.drain(..)) {
+            if op_seq > seq {
+                bytes += value_bytes(&op);
+                kept_ops.push(op);
+                kept_seqs.push(op_seq);
+            }
+        }
+        self.ops = kept_ops;
+        self.seqs = kept_seqs;
+        self.bytes = bytes;
     }
 }
 
@@ -350,18 +374,34 @@ impl Room {
             return;
         };
         let bytes: usize = ops.iter().map(value_bytes).sum();
-        let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), bytes: 0, complete: true });
+        let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), seqs: Vec::new(), bytes: 0, complete: true });
         if log.bytes + bytes > TEXT_BYTES {
             // Dropping the oldest would leave a replay that cannot be applied, because later
             // operations anchor on characters the dropped ones created. Saying so is the only
             // honest answer.
             log.complete = false;
             log.ops.clear();
+            log.seqs.clear();
             log.bytes = 0;
             return;
         }
         log.ops.extend(ops.iter().cloned());
+        // Every op in one submit shares that submit's sequence, which is what a
+        // save checkpoint later compares against.
+        log.seqs.extend(std::iter::repeat_n(op.seq, ops.len()));
         log.bytes += bytes;
+    }
+
+    /// Note that the document has been saved up to `seq`.
+    ///
+    /// Every ordered edit through `seq` is now in the file, so the retained CRDT
+    /// operations at or below it are dropped. A joiner that loads the saved file
+    /// then receives only the operations after the save, rather than replaying
+    /// text the file already contains and seeing it twice.
+    pub fn checkpoint(&mut self, seq: u64) {
+        for log in self.texts.values_mut() {
+            log.drop_through(seq);
+        }
     }
 
     /// Record a grant the bus already made.
@@ -448,6 +488,38 @@ mod tests {
         let dropped = r.leave("alice");
         assert_eq!(dropped, vec!["B2".to_owned()]);
         assert!(!r.peers().iter().any(|p| p.peer == "alice"), "the last connection leaving removes the peer");
+    }
+
+    fn crdt_sub(peer: &str, scope: &str) -> Submission {
+        Submission {
+            peer_id: peer.to_owned(),
+            may_edit: true,
+            command: "crdt.text".to_owned(),
+            params: serde_json::json!({ "scope": scope, "ops": [{ "op": "x" }] }),
+            scope: None,
+            local: None,
+        }
+    }
+
+    #[test]
+    fn a_save_checkpoint_drops_the_operations_the_file_now_holds() {
+        // Three text edits are retained. A save reflecting the first two drops
+        // them, because the file now carries that text. Only the edit after the
+        // save is still replayed, so a joiner loading the file does not apply
+        // the saved text a second time.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        r.submit(1, crdt_sub("alice", "/body/0")).unwrap();
+        r.submit(2, crdt_sub("alice", "/body/0")).unwrap();
+        r.submit(3, crdt_sub("alice", "/body/0")).unwrap();
+        assert_eq!(r.texts().get("/body/0").unwrap().ops().len(), 3);
+
+        r.checkpoint(2);
+        assert_eq!(r.texts().get("/body/0").unwrap().ops().len(), 1, "only the edit after the save survives");
+
+        // A save reflecting everything leaves nothing to replay.
+        r.checkpoint(3);
+        assert!(r.texts().get("/body/0").unwrap().ops().is_empty());
     }
 
     #[test]

@@ -246,6 +246,36 @@ fn a_replay_rebuilds_the_text_on_a_joining_replica() {
     assert_eq!(bob.render("/body/0"), alice.render("/body/0"));
 }
 
+/// Issue 27. Alice types "!" into "hello" and saves "hello!" while connected.
+/// The client tells the relay the save reflects that edit, so the operation is
+/// no longer replayed. A joiner that opens the saved file does not apply the "!"
+/// a second time and see "hello!!".
+#[test]
+fn a_save_checkpoint_stops_a_joiner_double_applying_the_saved_text() {
+    use craft_collab::Texts;
+    let mut alice = Texts::in_space(1);
+    alice.seed("/body/0", "hello");
+    let ops = alice.local_insert("/body/0", 5, "!").expect("seeded and in a space");
+    let saved = alice.render("/body/0").expect("rendered");
+    assert_eq!(saved, "hello!");
+
+    let mut r = room_with(&[("alice", true)]);
+    let params = json!({ "scope": "/body/0", "ops": serde_json::to_value(&ops).expect("ops encode") });
+    r.submit(1, sub("alice", true, "crdt.text", params, None)).expect("ok");
+
+    // Alice saves "hello!", which reflects the edit ordered at sequence 1.
+    r.checkpoint(1);
+
+    // Bob joins, loads the saved file, and is replayed nothing.
+    let log = r.texts().get("/body/0").expect("retained");
+    assert!(log.ops().is_empty(), "the saved edit is not replayed again");
+    let replay: Vec<craft_crdt::text::TextOp> =
+        serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("decodes");
+    let mut bob = Texts::in_space(2);
+    bob.apply("/body/0", &replay);
+    assert_eq!(bob.seed("/body/0", &saved), "hello!", "the file's text is not doubled");
+}
+
 /// Latest wins, and the newest value per kind is what a joining peer is handed.
 #[test]
 fn ephemeral_state_keeps_only_the_newest_value_per_kind() {

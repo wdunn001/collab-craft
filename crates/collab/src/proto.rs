@@ -95,6 +95,15 @@ pub enum ClientMsg {
     /// Allowed without edit permission: somebody watching a design should still be able to
     /// say where they are looking.
     Ephemeral { doc: DocId, kind: String, payload: Value },
+    /// Tell the relay the document was saved, reflecting every ordered edit
+    /// through `seq`.
+    ///
+    /// The saved file now contains those edits, so the relay stops replaying the
+    /// CRDT operations at or below `seq` to a late joiner. Without it a joiner
+    /// that loads the saved file and then receives those operations applies them
+    /// a second time, and a character typed once appears twice. The client sends
+    /// this after a save succeeds, with the sequence it had applied.
+    Saved { doc: DocId, seq: u64 },
 }
 
 /// Relay to client.

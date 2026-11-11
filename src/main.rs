@@ -124,6 +124,11 @@ struct EphemeralMsg {
     payload: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct SavedMsg {
+    seq: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct JoinedMsg<'a> {
     doc: String,
@@ -374,6 +379,7 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
     socket.on("resync", on_resync);
     socket.on("frame", on_frame);
     socket.on("ephemeral", on_ephemeral);
+    socket.on("saved", on_saved);
     socket.on_disconnect(on_disconnect);
     socket.join(room_name.clone());
 
@@ -718,6 +724,22 @@ async fn on_ephemeral(socket: SocketRef, Data(msg): Data<EphemeralMsg>, State(re
         .to(room_name.clone())
         .emit("ephemeral", &serde_json::json!({ "doc": room_name, "origin": claims.pid, "kind": msg.kind, "payload": msg.payload }))
         .await;
+}
+
+/// Record that the document was saved, so the file's own content is no longer
+/// also replayed as operations.
+///
+/// The client reports the sequence the save reflects. Every retained CRDT
+/// operation at or below it is now in the file, so the relay drops it: a joiner
+/// that loads the saved file and then receives those operations would otherwise
+/// apply them a second time. Takes no edit permission, because a save is a read
+/// of the document a reader may also do, and it only prunes replay state.
+async fn on_saved(socket: SocketRef, Data(msg): Data<SavedMsg>, State(relay): State<Arc<Relay>>) {
+    let Some(claims) = live_claims(&socket) else { return };
+    let mut rooms = relay.rooms.lock().await;
+    if let Some(room) = rooms.get_mut(&claims.rm) {
+        room.checkpoint(msg.seq);
+    }
 }
 
 async fn on_disconnect(socket: SocketRef, State(relay): State<Arc<Relay>>) {

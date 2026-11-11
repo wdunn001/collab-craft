@@ -49,6 +49,19 @@ fn joining_records_identity_sequence_and_roster() {
 }
 
 #[test]
+fn saved_reports_the_sequence_the_client_has_applied() {
+    let mut s = Session::new(DOC);
+    s.handle(joined(17));
+    match s.saved() {
+        ClientMsg::Saved { doc, seq } => {
+            assert_eq!(doc, DOC);
+            assert_eq!(seq, 17, "a save reflects everything the client has applied in order");
+        }
+        other => panic!("expected Saved, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_join_sorts_existing_locks_into_mine_and_theirs() {
     let mut s = Session::new(DOC);
     s.handle(ServerMsg::Joined {
