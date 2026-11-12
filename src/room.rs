@@ -46,6 +46,17 @@ pub const TEXT_BYTES: usize = 2 * 1024 * 1024;
 /// document has a scope per editable unit, far below this.
 pub const MAX_SCOPES: usize = 4096;
 
+/// Bytes of retained CRDT operations a document may hold across every scope.
+///
+/// [`TEXT_BYTES`] bounds one scope, and [`MAX_SCOPES`] bounds how many scopes
+/// exist, but their product is nowhere near a sane room budget: a client that
+/// spreads its edits across many near-cap scopes instead of one would
+/// otherwise retain gigabytes while every individual check still passes. This
+/// is the guard that actually bounds total memory. Set to the same figure as
+/// [`HISTORY_BYTES`] on purpose: it is the same per-room budget already
+/// accepted for the op history, applied to the other unbounded-by-count pool.
+pub const TOTAL_TEXT_BYTES: usize = HISTORY_BYTES;
+
 /// Latest-wins values one peer may hold at once.
 ///
 /// A camera and a selection are two kinds. An unbounded set would let one peer grow the room
@@ -199,6 +210,10 @@ pub struct Room {
     history_bytes: usize,
     /// scope -> the CRDT operations a joining peer needs.
     texts: HashMap<String, TextLog>,
+    /// Bytes of `ops` currently held across every [`Room::texts`] entry, kept so
+    /// [`Room::retain_text`] can enforce [`TOTAL_TEXT_BYTES`] without summing every
+    /// scope on each submit.
+    text_bytes: usize,
     /// peer -> kind -> the newest value that peer sent.
     ephemeral: HashMap<String, HashMap<String, serde_json::Value>>,
 }
@@ -373,8 +388,9 @@ impl Room {
     ///
     /// The op history exists to fill a gap in the sequence and is evicted by age. These are
     /// what a joining peer is replayed, so they are kept per scope and survive that eviction.
-    /// A scope past [`TEXT_BYTES`] is marked incomplete, which is what lets a joiner be told
-    /// the text cannot be rebuilt instead of being handed a partial replay.
+    /// A scope past [`TEXT_BYTES`], or a document past [`TOTAL_TEXT_BYTES`] across every scope,
+    /// is marked incomplete, which is what lets a joiner be told the text cannot be rebuilt
+    /// instead of being handed a partial replay.
     fn retain_text(&mut self, op: &Op) {
         if !is_crdt_command(&op.command) {
             return;
@@ -397,11 +413,17 @@ impl Room {
             return;
         }
         let log = self.texts.entry(scope.to_owned()).or_insert_with(|| TextLog { ops: Vec::new(), seqs: Vec::new(), bytes: 0, complete: true });
-        if log.bytes + bytes > TEXT_BYTES {
+        // Both bounds, because either alone leaves the other kind of growth unbounded: one
+        // scope filled past its own cap, or many scopes each under it but summing past what
+        // the room as a whole may hold. `self.text_bytes` still counts this scope's current
+        // bytes, which is why the comparison is against the total after adding `bytes` rather
+        // than before.
+        if log.bytes + bytes > TEXT_BYTES || self.text_bytes + bytes > TOTAL_TEXT_BYTES {
             // Dropping the oldest would leave a replay that cannot be applied, because later
             // operations anchor on characters the dropped ones created. Saying so is the only
             // honest answer.
             log.complete = false;
+            self.text_bytes = self.text_bytes.saturating_sub(log.bytes);
             log.ops.clear();
             log.seqs.clear();
             log.bytes = 0;
@@ -412,6 +434,7 @@ impl Room {
         // save checkpoint later compares against.
         log.seqs.extend(std::iter::repeat_n(op.seq, ops.len()));
         log.bytes += bytes;
+        self.text_bytes += bytes;
     }
 
     /// Note that the document has been saved up to `seq`.
@@ -420,11 +443,21 @@ impl Room {
     /// operations at or below it are dropped. A joiner that loads the saved file
     /// then receives only the operations after the save, rather than replaying
     /// text the file already contains and seeing it twice.
+    ///
+    /// `seq` is capped at [`Room::seq`]. It is a client's report of what its own save reflects,
+    /// and a save can only reflect edits this room has actually ordered: a claim past that
+    /// would move the join baseline ahead of live edits and strand a later joiner, who would
+    /// then treat them as already seen and never receive them.
     pub fn checkpoint(&mut self, seq: u64) {
+        let seq = seq.min(self.seq);
         self.saved_seq = self.saved_seq.max(seq);
         for log in self.texts.values_mut() {
             log.drop_through(seq);
         }
+        // Recomputed rather than tracked through the drop, because `drop_through` already
+        // walks every surviving op to rebuild `bytes`; summing here is the same cost repeated
+        // once per save, not once per op, and cannot drift from what the scopes actually hold.
+        self.text_bytes = self.texts.values().map(|log| log.bytes).sum();
     }
 
     /// The sequence the saved file reflects. See [`Room::saved_seq`] field.
@@ -448,6 +481,17 @@ impl Room {
     /// Note that somebody else holds a scope, learned from a refusal.
     pub fn record_holder(&mut self, scope: String, holder: String) {
         self.locks.insert(scope, holder);
+    }
+
+    /// Drop a mirrored holder with no peer to match against.
+    ///
+    /// For when the bus has already confirmed the scope is actually free: a holder's lease
+    /// lapsed in Valkey on its own (a crash with no clean unlock), and nothing told this
+    /// mirror. Unlike [`Room::unlock`], there is no releasing peer here, because the one who
+    /// held it is already gone; the caller already checked the bus itself before reaching for
+    /// this.
+    pub fn forget_lock(&mut self, scope: &str) {
+        self.locks.remove(scope);
     }
 
     /// Release a scope, but only if this peer holds it.
@@ -483,12 +527,10 @@ impl Room {
         // when a lock landed in the race window. That number never arrives, so a
         // peer replaying across the hole waits for it forever. Report the gap as
         // unreplayable, which is the caller's cue to send a snapshot instead.
-        let mut expected = have + 1;
-        for op in &ops {
+        for (expected, op) in (have + 1..).zip(ops.iter()) {
             if op.seq != expected {
                 return None;
             }
-            expected += 1;
         }
         Some(ops)
     }
@@ -612,6 +654,51 @@ mod tests {
         assert_eq!(r.saved_seq(), 2);
         let after_save = r.since(r.saved_seq()).map(|ops| ops.iter().map(|o| o.seq).collect::<Vec<_>>());
         assert_eq!(after_save, Some(vec![3]), "after a save, only the later ops replay");
+    }
+
+    #[test]
+    fn a_checkpoint_past_the_room_s_own_sequence_is_capped() {
+        // A client's report of what its save reflects is capped at the room's own sequence.
+        // Otherwise a save claiming it covers edits the room never ordered would move the
+        // join baseline past live edits and strand a later joiner behind them.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        r.submit(1, plain_sub("alice")).unwrap();
+        r.checkpoint(u64::MAX);
+        assert_eq!(r.saved_seq(), 1, "the claimed save cannot reach past the room's own sequence");
+    }
+
+    #[test]
+    fn total_retained_text_bytes_are_bounded_across_scopes() {
+        // TEXT_BYTES bounds one scope and MAX_SCOPES bounds how many exist, but their product
+        // is far larger than a room should ever hold. Many scopes each under the per-scope cap
+        // must still be bounded in total, or a client spreading its edits across scopes grows
+        // the room without limit one bounded log at a time.
+        let mut r = Room::default();
+        r.join(peer("alice")).unwrap();
+        let blob = "x".repeat(TEXT_BYTES - 64);
+        let mut seq = 0u64;
+        for i in 0.. {
+            seq += 1;
+            let sub = Submission {
+                peer_id: "alice".to_owned(),
+                may_edit: true,
+                command: "crdt.text".to_owned(),
+                params: serde_json::json!({ "scope": format!("/s/{i}"), "ops": [blob.clone()] }),
+                scope: None,
+                local: None,
+            };
+            r.submit(seq, sub).unwrap();
+            if i >= 2 * (TOTAL_TEXT_BYTES / TEXT_BYTES) {
+                break;
+            }
+        }
+        let retained: usize = r.texts().values().map(|log| log.bytes).sum();
+        assert!(
+            retained <= TOTAL_TEXT_BYTES,
+            "retained {retained} bytes across {} scopes, more than the room-wide budget of {TOTAL_TEXT_BYTES}",
+            r.texts().len()
+        );
     }
 
     #[test]
