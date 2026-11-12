@@ -43,7 +43,18 @@ pub trait Hub {
 /// has to know the whole set before anything arrives. An event missing from here is an event
 /// nobody is listening for, which looks like a relay that connects and then says nothing.
 pub const EVENTS: [&str; 12] = [
-    "joined", "op", "lock_granted", "lock_denied", "lock_released", "presence_lock", "presence", "snapshot", "text_ops", "frame", "ephemeral", "error",
+    "joined",
+    "op",
+    "lock_granted",
+    "lock_denied",
+    "lock_released",
+    "presence_lock",
+    "presence",
+    "snapshot",
+    "text_ops",
+    "frame",
+    "ephemeral",
+    "error",
 ];
 
 /// Encode a client message as the JSON a Socket.IO event carries.

@@ -100,10 +100,18 @@ impl Git {
     }
 
     /// Branch and repository URL for the Open / Save chrome.
+    ///
+    /// Production builds `GitView` straight from the provider config in `api.rs` instead of
+    /// calling this, so only this module's own test exercises either method below. Kept rather
+    /// than deleted: this is the one place that derives `remote` from the configured `api`
+    /// address the same way the rest of this adapter does, and `api.rs`'s copy should
+    /// eventually call it rather than duplicate the branch naming.
+    #[allow(dead_code, reason = "exercised by this module's own test; see the comment above")]
     pub fn view(&self) -> GitView {
         GitView { branch: self.branch.clone(), remote: self.remote_url() }
     }
 
+    #[allow(dead_code, reason = "called only from `view`, above")]
     fn remote_url(&self) -> String {
         if self.api == "https://api.github.com" {
             return format!("https://github.com/{}/{}", self.owner, self.repo);

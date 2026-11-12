@@ -111,5 +111,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `craft_collab::Texts` against the operations `Room` retained, so the round trip is checked
 # against the client that has to decode it rather than against an assumption about the shape.
 [dev-dependencies]
-craft-collab = { workspace = true }
+craft-collab = { workspace = true, features = ["native-hub"] }
 craft-crdt = { workspace = true }

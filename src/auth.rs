@@ -211,7 +211,11 @@ pub struct DeviceConfirm {
 /// The session handed to the desktop is a fresh one for the approving user, so
 /// the two are separate records that the same sign-out still ends together.
 /// CSRF-guarded, because this mints a credential.
-pub async fn device_approve(State(app): State<Arc<App>>, session: Session, axum::extract::Form(form): axum::extract::Form<DeviceConfirm>) -> Response {
+pub async fn device_approve(
+    State(app): State<Arc<App>>,
+    session: Session,
+    axum::extract::Form(form): axum::extract::Form<DeviceConfirm>,
+) -> Response {
     if !crate::pages::csrf_ok(&app.secret, &session.user, &form.csrf) {
         return axum::response::Html(device_form(&app, &session, Some("That form went stale. Try again."))).into_response();
     }
@@ -329,11 +333,15 @@ pub async fn link_poll(State(app): State<Arc<App>>, session: Session, Json(q): J
             let Some((config, _)) = app.provider_config().await else {
                 return (
                     StatusCode::NOT_IMPLEMENTED,
-                    Json(crate::api::ApiError { code: "provider_not_configured", detail: "this deployment has no cloud provider configured".to_owned() }),
+                    Json(crate::api::ApiError {
+                        code: "provider_not_configured",
+                        detail: "this deployment has no cloud provider configured".to_owned(),
+                    }),
                 )
                     .into_response();
             };
-            let link = ProviderLink { user: app_password.user, password: app_password.password, base: config.base.clone(), kind: config.kind.clone() };
+            let link =
+                ProviderLink { user: app_password.user, password: app_password.password, base: config.base.clone(), kind: config.kind.clone() };
             if !app.store.put_provider_link(&session.user, &link).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,

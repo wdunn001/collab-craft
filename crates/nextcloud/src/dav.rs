@@ -66,11 +66,7 @@ impl Entry {
         if self.permissions.is_empty() {
             return None;
         }
-        Some(if self.is_dir {
-            self.permissions.contains('C') || self.permissions.contains('K')
-        } else {
-            self.permissions.contains('W')
-        })
+        Some(if self.is_dir { self.permissions.contains('C') || self.permissions.contains('K') } else { self.permissions.contains('W') })
     }
 }
 

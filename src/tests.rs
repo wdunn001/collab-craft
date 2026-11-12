@@ -269,8 +269,7 @@ fn a_save_checkpoint_stops_a_joiner_double_applying_the_saved_text() {
     // Bob joins, loads the saved file, and is replayed nothing.
     let log = r.texts().get("/body/0").expect("retained");
     assert!(log.ops().is_empty(), "the saved edit is not replayed again");
-    let replay: Vec<craft_crdt::text::TextOp> =
-        serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("decodes");
+    let replay: Vec<craft_crdt::text::TextOp> = serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("decodes");
     let mut bob = Texts::in_space(2);
     bob.apply("/body/0", &replay);
     assert_eq!(bob.seed("/body/0", &saved), "hello!", "the file's text is not doubled");

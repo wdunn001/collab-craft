@@ -996,7 +996,8 @@ async fn remember(app: &App, owner: &str, config: &crate::settings::ProviderConf
     let legacy = app.store.provider_link(owner).await;
     let same = app.provider_config().await.is_some_and(|(current, _)| current.kind == config.kind && current.base == config.base);
     if legacy.is_none() && same && config.kind != "google" {
-        let link = crate::store::ProviderLink { user: user.to_owned(), password: secret.to_owned(), base: config.base.clone(), kind: config.kind.clone() };
+        let link =
+            crate::store::ProviderLink { user: user.to_owned(), password: secret.to_owned(), base: config.base.clone(), kind: config.kind.clone() };
         return app.store.put_provider_link(owner, &link).await;
     }
     let mut connection = crate::store::Connection {

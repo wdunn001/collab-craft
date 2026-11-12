@@ -92,6 +92,11 @@ impl Permissions {
     /// The group half arrives as one line per group, `group: app, app`. A
     /// repeating pair of fields would need script to add a row, and this page
     /// works without any.
+    ///
+    /// Not wired into a route yet; the checkbox builder below is what the setup page actually
+    /// posts to. Kept, and exercised by this module's own round-trip test, for the free-text
+    /// variant of that page should one ever ship.
+    #[allow(dead_code, reason = "exercised by this module's own test; see the comment above")]
     pub fn parse(default: &str, groups: &str) -> Permissions {
         let mut by_group = BTreeMap::new();
         for line in groups.lines() {
@@ -110,6 +115,7 @@ impl Permissions {
     }
 
     /// The group half, as the setup page's textarea wants it back.
+    #[allow(dead_code, reason = "paired with `parse`, above, which is in the same position")]
     pub fn groups_text(&self) -> String {
         self.by_group.iter().map(|(group, apps)| format!("{group}: {}\n", apps.join(", "))).collect()
     }
