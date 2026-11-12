@@ -50,6 +50,15 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod review_repro;
+
+#[cfg(test)]
+mod review_reverify;
+
+#[cfg(test)]
+mod review_reverify2;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -88,6 +97,17 @@ struct Relay {
 #[derive(Debug, Deserialize)]
 struct Handshake {
     token: String,
+    /// The sequence this connection has already applied, when it is resuming a session rather
+    /// than loading the document fresh.
+    ///
+    /// Absent, or sent as `null`, on a fresh load: an older client that never sends the field
+    /// decodes the same way, so this is a compatible extension rather than a breaking one. The
+    /// join then baselines on the saved file's sequence as it always did. When it is present,
+    /// the join baselines there instead, because that connection already knows what it has
+    /// applied and resuming anywhere else either strands it behind a save it never loaded, or
+    /// re-sends it ops it already has.
+    #[serde(default)]
+    applied: Option<u64>,
 }
 
 // ---- payloads, matching craft-collab's proto ------------------------------
@@ -128,6 +148,14 @@ struct EphemeralMsg {
 struct SavedMsg {
     seq: u64,
 }
+
+/// Stashed on a socket once it has actually reached `Room::join`.
+///
+/// See the comment where it is inserted, in `on_connect`, and where it is read, in
+/// `on_disconnect`. `Clone` because `Extensions::insert`/`get` require it, not because a copy
+/// of this ever means anything beyond its own presence.
+#[derive(Clone)]
+struct JoinedRoom;
 
 #[derive(Debug, Serialize)]
 struct JoinedMsg<'a> {
@@ -428,16 +456,23 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
                 for (scope, holder) in &locks {
                     room.record_holder(scope.clone(), holder.clone());
                 }
-                // Catch the joiner up from the version the file reflects, not the
-                // current sequence. The file it loads is at `saved_seq`, and the
-                // ops after that bring it current. Replaying them as ordered ops
-                // reuses the path a live edit already takes, so the joiner does
-                // not silently miss the edits made since the last save. When the
+                // Catch the joiner up from where IT already is, not from where the
+                // saved file is. A connection resuming a session knows what it has
+                // already applied, and that is the only baseline that is correct
+                // for it: the saved file's sequence can be ahead of it (a save
+                // happened while it was gone, and resuming there would skip the
+                // edits made before that save that it never saw) or behind it (it
+                // is already caught up, and resuming at the file's sequence would
+                // re-send ops it has). A fresh load has no applied sequence of its
+                // own to offer, and the file it just read is at `saved_seq`, so
+                // that is the only baseline available to it. Either way the ops
+                // after the baseline bring it current, replayed as ordered ops so
+                // the path is the same one a live edit already takes. When the
                 // history no longer reaches that baseline, or a burned sequence
                 // broke the run, there is nothing clean to replay, so the join
                 // falls back to the current sequence and the retained text: the
                 // joiner then leans on the file alone, the older behaviour.
-                let baseline = room.saved_seq();
+                let baseline = handshake.applied.unwrap_or_else(|| room.saved_seq());
                 match room.since(baseline) {
                     Some(replay) => Some((baseline, replay, Vec::new(), room.peers().to_vec(), room.ephemeral())),
                     None => {
@@ -457,6 +492,14 @@ async fn on_connect(socket: SocketRef, Data(handshake): Data<Handshake>, State(r
         let _ = socket.disconnect();
         return;
     };
+
+    // Mark this socket as having actually reached `Room::join`. `on_disconnect` is registered
+    // near the top of this function, well before the bus calls that can still refuse the
+    // connection (`next_space`, above). A socket disconnected for one of those reasons never
+    // joined the room at all, and without this marker its disconnect would still call
+    // `Room::leave` for its peer id, which can evict a different, live connection sharing that
+    // id and drop its locks.
+    socket.extensions.insert(JoinedRoom);
 
     let _ = socket.emit(
         "joined",
@@ -514,14 +557,52 @@ async fn on_submit(socket: SocketRef, Data(msg): Data<SubmitMsg>, State(relay): 
     // crdt.* commands merge; a scope on them is a client bug and is stripped
     // before the lock check so a held region cannot refuse the edit.
     let scope = if is_crdt_command(&msg.command) { None } else { msg.scope };
-    let preflight = {
-        let rooms = relay.rooms.lock().await;
-        let holder = rooms.get(&claims.rm).and_then(|r| scope.as_deref().and_then(|sc| r.holder_of(sc))).map(str::to_owned);
-        match holder {
-            Some(h) if h != claims.pid => Err(Refusal::Locked { holder: h }),
-            _ if !claims.may_edit() => Err(Refusal::ReadOnly),
-            _ => Ok(()),
+    let preflight = match &scope {
+        Some(scope_name) => {
+            let mirrored = {
+                let rooms = relay.rooms.lock().await;
+                rooms.get(&claims.rm).and_then(|r| r.holder_of(scope_name)).map(str::to_owned)
+            };
+            match mirrored {
+                Some(holder) if holder != claims.pid => {
+                    // The mirror is refreshed only on a local grant, refusal or release, so a
+                    // lease that lapsed naturally in Valkey (its holder's socket went away
+                    // without unlocking) leaves the mirror pointing at a holder who no longer
+                    // has anything. Confirmed against the bus before refusing on it, rather
+                    // than trusted outright: unlike the residual case above, a stale refusal
+                    // here is a region the room stays wedged on until something else happens
+                    // to touch the mirror, not a one-off burned sequence a resync clears up.
+                    let current = {
+                        let mut bus = relay.bus.lock().await;
+                        bus.current_holder(&claims.rm, scope_name).await
+                    };
+                    match current {
+                        Ok(Some(still)) if still != claims.pid => {
+                            let mut rooms = relay.rooms.lock().await;
+                            rooms.entry(claims.rm.clone()).or_default().record_holder(scope_name.clone(), still.clone());
+                            Err(Refusal::Locked { holder: still })
+                        }
+                        Ok(_) => {
+                            // Either the bus now agrees this peer holds it, or the lease
+                            // lapsed and nobody does. Either way the mirror was wrong; forget
+                            // it so later submits to this scope do not pay this round trip
+                            // again.
+                            let mut rooms = relay.rooms.lock().await;
+                            rooms.entry(claims.rm.clone()).or_default().forget_lock(scope_name);
+                            if claims.may_edit() { Ok(()) } else { Err(Refusal::ReadOnly) }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, room = %claims.rm, scope = %scope_name, "could not confirm a mirrored lock; trusting the mirror");
+                            Err(Refusal::Locked { holder })
+                        }
+                    }
+                }
+                _ if !claims.may_edit() => Err(Refusal::ReadOnly),
+                _ => Ok(()),
+            }
         }
+        None if !claims.may_edit() => Err(Refusal::ReadOnly),
+        None => Ok(()),
     };
     if let Err(refusal) = preflight {
         let _ = socket.emit("error", &ErrorMsg { doc: room_name, detail: refusal.detail() });
@@ -755,10 +836,17 @@ async fn on_ephemeral(socket: SocketRef, Data(msg): Data<EphemeralMsg>, State(re
 /// The client reports the sequence the save reflects. Every retained CRDT
 /// operation at or below it is now in the file, so the relay drops it: a joiner
 /// that loads the saved file and then receives those operations would otherwise
-/// apply them a second time. Takes no edit permission, because a save is a read
-/// of the document a reader may also do, and it only prunes replay state.
+/// apply them a second time. Requires edit permission: a reader never wrote the
+/// file, so it cannot know what the file reflects, and trusting its report would
+/// prune another editor's unsaved work out of the replay with no way to tell the
+/// two cases apart afterwards. [`Room::checkpoint`] additionally caps the claimed
+/// sequence at the room's own, so a save cannot move the join baseline ahead of
+/// edits the room has actually ordered.
 async fn on_saved(socket: SocketRef, Data(msg): Data<SavedMsg>, State(relay): State<Arc<Relay>>) {
     let Some(claims) = live_claims(&socket) else { return };
+    if !claims.may_edit() {
+        return;
+    }
     let mut rooms = relay.rooms.lock().await;
     if let Some(room) = rooms.get_mut(&claims.rm) {
         room.checkpoint(msg.seq);
@@ -767,6 +855,13 @@ async fn on_saved(socket: SocketRef, Data(msg): Data<SavedMsg>, State(relay): St
 
 async fn on_disconnect(socket: SocketRef, State(relay): State<Arc<Relay>>) {
     let Some(claims) = socket.extensions.get::<Claims>() else { return };
+    // This socket never reached `Room::join` (refused at `next_space`, or the room was full),
+    // so it was never counted into the room and has nothing to release. Calling `Room::leave`
+    // anyway would still find the live connection sharing this peer id and evict it, taking
+    // its locks with it.
+    if socket.extensions.get::<JoinedRoom>().is_none() {
+        return;
+    }
     let room_name = claims.room();
 
     let (dropped, roster, empty) = {

@@ -202,6 +202,21 @@ impl Bus {
         }
     }
 
+    /// Who currently holds a scope, read directly rather than through [`Bus::holders`]' `SCAN`.
+    ///
+    /// For confirming a belief about one scope (the submit preflight's local mirror) against
+    /// the authority before refusing an edit on it. A `SCAN` across every held scope would be
+    /// wasteful just to check one, and `holders` exists for the join payload, not a per-submit
+    /// recheck.
+    pub async fn current_holder(&mut self, room: &str, scope: &str) -> Result<Option<String>, BusError> {
+        let key = self.lock_key(room, scope);
+        match self.conn.get(&key).await {
+            Ok(v) => Ok(v),
+            Err(e) if is_readonly(&e) => Err(BusError::ReadOnlyReplica),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Extend a lock this peer holds. Returns whether it still held it.
     pub async fn refresh_lock(&mut self, room: &str, scope: &str, peer: &str) -> Result<bool, BusError> {
         let key = self.lock_key(room, scope);
