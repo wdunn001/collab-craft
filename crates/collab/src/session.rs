@@ -18,7 +18,13 @@ use crate::proto::{ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerM
 
 /// Ops held past this many waiting for a gap to fill. Beyond it the session asks for a resync,
 /// because a gap that wide means something was lost rather than reordered.
-const MAX_PENDING: usize = 512;
+///
+/// Was 512: generous for normal reordering, but it also meant a connected session sitting
+/// behind a genuine hole (a burned sequence number, a dropped message) held every edit silently
+/// for as long as it took the room to produce another 512 of them, which in an interactive
+/// editor can be minutes. Normal network reordering resolves within a handful of ops, so this
+/// is still an order of magnitude past that before the session concludes something was lost.
+const MAX_PENDING: usize = 64;
 
 /// What the app should do in response to relay traffic.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +172,15 @@ impl Session {
     /// operations the file already contains, so a late joiner that loads the
     /// saved file does not apply them again and see a character twice. The app
     /// calls this once a save to the provider has succeeded.
+    ///
+    /// Call it only once every edit the saved file reflects has actually been confirmed
+    /// ([`Effect::Confirmed`] received, [`Session::inflight`] back to the count it was before
+    /// those edits). This reports [`Session::applied`], which is what the relay has ordered,
+    /// not what this replica has rendered: an app that renders a local edit optimistically,
+    /// writes that rendering to the file, and calls this before the edit comes back ordered
+    /// reports a sequence that understates what the file already holds. The relay then keeps
+    /// replaying an operation the saved file already contains, and a later joiner sees it
+    /// twice.
     pub fn saved(&self) -> ClientMsg {
         ClientMsg::Saved { doc: self.doc.clone(), seq: self.applied }
     }

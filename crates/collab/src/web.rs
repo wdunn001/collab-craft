@@ -45,14 +45,26 @@ impl WebHub {
     /// handshake auth, so it never appears in a query string and therefore never lands in an
     /// access log.
     ///
+    /// `applied` is the sequence this connection has already applied, when it is resuming a
+    /// [`crate::Session`] rather than opening the document fresh. Pass `Session::applied()`
+    /// when reconnecting with a session that survived the drop, and `None` on a first join or
+    /// after reloading the file. The relay joins at `applied` when it is given and at the
+    /// saved file's sequence otherwise, so a reconnect is caught up on exactly what it missed
+    /// rather than on what the file happened to be saved at.
+    ///
     /// Returns as soon as the socket exists. Socket.IO connects in the background and queues what
     /// is sent meanwhile, and [`Hub::connected`] says whether it has arrived.
-    pub fn connect(url: &str, token: &str) -> Result<WebHub> {
+    pub fn connect(url: &str, token: &str, applied: Option<u64>) -> Result<WebHub> {
         let global = js_sys::global();
         let io = function(global.as_ref(), "io").ok_or_else(|| Error::Hub("this page has not loaded socket.io-client".to_owned()))?;
 
         let auth = Object::new();
         Reflect::set(&auth, &JsValue::from_str("token"), &JsValue::from_str(token)).map_err(js)?;
+        let applied_js = match applied {
+            Some(applied) => JsValue::from_f64(applied as f64),
+            None => JsValue::NULL,
+        };
+        Reflect::set(&auth, &JsValue::from_str("applied"), &applied_js).map_err(js)?;
         let options = Object::new();
         Reflect::set(&options, &JsValue::from_str("auth"), &auth).map_err(js)?;
 

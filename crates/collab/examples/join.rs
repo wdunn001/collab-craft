@@ -60,7 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // client, with two different socket ids. Waiting for the relay's own "joined" message
     // before sending anything is enough to avoid the race, because by the time "joined" is
     // sent, the socket's registration has already completed on the server.
-    let mut hub = NativeHub::connect(&relay, &token).await?;
+    // No prior session to resume: this example always opens the document fresh.
+    let mut hub = NativeHub::connect(&relay, &token, None).await?;
     println!("connected as {display:?}, waiting for the relay to join {display:?} in");
 
     let deadline = Instant::now() + Duration::from_secs(seconds);
