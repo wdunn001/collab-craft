@@ -171,7 +171,11 @@ impl<H: Http> craft_cloud::Files for Nextcloud<H> {
             if e.path.trim_end_matches('/') == at.trim_end_matches('/') {
                 continue;
             }
-            out.push(entry_from(e, None, true));
+            // Read the grant from the server's own `oc:permissions`. A read-only
+            // share lists here as any other entry, and reporting it writable is
+            // what lets a viewer mint an edit token for it later.
+            let writable = e.writable().unwrap_or(true);
+            out.push(entry_from(e, None, writable));
         }
         Ok(out)
     }
@@ -217,21 +221,46 @@ impl<H: Http> craft_cloud::Files for Nextcloud<H> {
     }
 
     fn write(&self, id: &str, bytes: &[u8], if_match: Option<&str>) -> CloudResult<CloudEntry> {
-        self.files().put(&self.http, id, bytes.to_vec(), if_match).map_err(lift)?;
-        craft_cloud::Files::stat(self, id)
+        // The etag the PUT returned is the version these bytes became. The stat
+        // that follows is only for the rest of the metadata, so its etag is
+        // overwritten: reading the version from it would hand back whoever's
+        // write happens to be current then, which is a lost update waiting to
+        // be used as the next save's baseline.
+        let put_etag = self.files().put(&self.http, id, bytes.to_vec(), if_match).map_err(lift)?;
+        let mut entry = craft_cloud::Files::stat(self, id)?;
+        if put_etag.is_some() {
+            entry.etag = put_etag;
+        }
+        Ok(entry)
     }
 
     fn create(&self, folder: &str, name: &str, bytes: &[u8]) -> CloudResult<CloudEntry> {
         let path = format!("{}/{}", folder.trim_end_matches('/'), name);
-        // No if_match: a create is not replacing anything the caller has read.
-        self.files().put(&self.http, &path, bytes.to_vec(), None).map_err(lift)?;
-        craft_cloud::Files::stat(self, &path)
+        // Refuse to replace an existing name. A create is a new document, and a
+        // "Save As" onto a colleague's file must fail rather than overwrite it.
+        let put_etag = self.files().create(&self.http, &path, bytes.to_vec()).map_err(lift)?;
+        let mut entry = craft_cloud::Files::stat(self, &path)?;
+        if put_etag.is_some() {
+            entry.etag = put_etag;
+        }
+        Ok(entry)
     }
 
     fn stat(&self, id: &str) -> CloudResult<CloudEntry> {
         // Depth 0. Filtering a Depth 1 listing cannot work here, because that
         // listing drops the very entry being asked about.
-        self.files().stat(&self.http, id).map(|e| entry_from(e, None, true)).map_err(lift)
+        //
+        // Writability comes from the server's `oc:permissions`, not an
+        // assumption. This is the stat the token endpoint runs before it mints,
+        // so a read-only share answering here with no write bit is what holds
+        // the token down to view.
+        self.files()
+            .stat(&self.http, id)
+            .map(|e| {
+                let writable = e.writable().unwrap_or(true);
+                entry_from(e, None, writable)
+            })
+            .map_err(lift)
     }
 }
 

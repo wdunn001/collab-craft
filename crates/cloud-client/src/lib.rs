@@ -79,6 +79,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Where to open the provider's conversation app with no document in hand.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConversationHome {
+    /// What the provider calls it (Talk, …).
+    pub name: String,
+    pub url: String,
+}
+
 /// What the server says about the signed-in user.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Me {
@@ -93,6 +101,19 @@ pub struct Me {
     pub capabilities: Vec<Capability>,
     /// Until this is true, Open and Save have nowhere to go.
     pub provider_linked: bool,
+    /// The provider's conversation lobby, when it has one.
+    #[serde(default)]
+    pub conversation: Option<ConversationHome>,
+    /// Present when CollabCraft is storing files in a git repository.
+    #[serde(default)]
+    pub git: Option<GitView>,
+}
+
+/// Branch and remote as Open / Save should show them.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct GitView {
+    pub branch: String,
+    pub remote: String,
 }
 
 /// A relay token and where to take it.

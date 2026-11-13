@@ -18,7 +18,13 @@ use crate::proto::{ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerM
 
 /// Ops held past this many waiting for a gap to fill. Beyond it the session asks for a resync,
 /// because a gap that wide means something was lost rather than reordered.
-const MAX_PENDING: usize = 512;
+///
+/// Was 512: generous for normal reordering, but it also meant a connected session sitting
+/// behind a genuine hole (a burned sequence number, a dropped message) held every edit silently
+/// for as long as it took the room to produce another 512 of them, which in an interactive
+/// editor can be minutes. Normal network reordering resolves within a handful of ops, so this
+/// is still an order of magnitude past that before the session concludes something was lost.
+const MAX_PENDING: usize = 64;
 
 /// What the app should do in response to relay traffic.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +50,20 @@ pub enum Effect {
     Notice { detail: String },
     /// Send this back to the relay. The session asks for its own resyncs this way.
     Send { msg: ClientMsg },
+    /// The relay granted this connection its CRDT id space.
+    ///
+    /// Nothing may mint a character id before this arrives, so it is an effect rather than a
+    /// field a caller has to remember to read.
+    Space { space: u32 },
+    /// CRDT operations this peer missed before it joined, for one scope.
+    ///
+    /// Outside the sequence, so no ordering applies. `complete` false means the relay could
+    /// not keep them all and the text cannot be rebuilt from the file plus these.
+    TextOps { scope: Scope, ops: Value, complete: bool },
+    /// An opaque frame from another peer, unread by the relay and by this session.
+    Frame { origin: PeerId, payload: String },
+    /// Latest-wins state about another peer.
+    Ephemeral { origin: PeerId, kind: String, payload: Value },
 }
 
 /// One document's shared-editing state.
@@ -63,6 +83,8 @@ pub struct Session {
     /// Scopes other peers hold.
     remote_locks: HashMap<Scope, PeerId>,
     roster: Vec<Presence>,
+    /// The CRDT id space the relay granted, once it has.
+    space: Option<u32>,
 }
 
 impl Session {
@@ -85,7 +107,16 @@ impl Session {
             held: HashSet::new(),
             remote_locks: HashMap::new(),
             roster: Vec::new(),
+            space: None,
         }
+    }
+
+    /// The CRDT id space the relay granted this connection.
+    ///
+    /// `None` until the join payload arrives. Minting a character id before then would reuse
+    /// another peer's identities.
+    pub fn space(&self) -> Option<u32> {
+        self.space
     }
 
     pub fn doc(&self) -> &str {
@@ -134,6 +165,26 @@ impl Session {
         ClientMsg::Lock { doc: self.doc.clone(), scope: scope.into() }
     }
 
+    /// The message to send after the document has been written to the file.
+    ///
+    /// It reports the sequence the save reflects, which is everything this
+    /// replica has applied in order. The relay then stops replaying the CRDT
+    /// operations the file already contains, so a late joiner that loads the
+    /// saved file does not apply them again and see a character twice. The app
+    /// calls this once a save to the provider has succeeded.
+    ///
+    /// Call it only once every edit the saved file reflects has actually been confirmed
+    /// ([`Effect::Confirmed`] received, [`Session::inflight`] back to the count it was before
+    /// those edits). This reports [`Session::applied`], which is what the relay has ordered,
+    /// not what this replica has rendered: an app that renders a local edit optimistically,
+    /// writes that rendering to the file, and calls this before the edit comes back ordered
+    /// reports a sequence that understates what the file already holds. The relay then keeps
+    /// replaying an operation the saved file already contains, and a later joiner sees it
+    /// twice.
+    pub fn saved(&self) -> ClientMsg {
+        ClientMsg::Saved { doc: self.doc.clone(), seq: self.applied }
+    }
+
     /// Give a scope back. Dropping it locally is immediate, because a release cannot be refused.
     pub fn release_lock(&mut self, scope: impl Into<Scope>) -> ClientMsg {
         let scope = scope.into();
@@ -159,6 +210,19 @@ impl Session {
         self.submit(command, params, None)
     }
 
+    /// Offer an opaque frame for pass-through.
+    ///
+    /// Carries no sequence and no local counter. The relay never decodes it and never stores
+    /// it, so a caller that signs and orders its own frames keeps both properties.
+    pub fn frame(&self, payload: impl Into<String>) -> ClientMsg {
+        ClientMsg::Frame { doc: self.doc.clone(), payload: payload.into() }
+    }
+
+    /// Offer latest-wins state about this peer, such as a camera or a selection.
+    pub fn ephemeral(&self, kind: impl Into<String>, payload: Value) -> ClientMsg {
+        ClientMsg::Ephemeral { doc: self.doc.clone(), kind: kind.into(), payload }
+    }
+
     /// How many local edits are awaiting confirmation.
     pub fn inflight(&self) -> usize {
         self.inflight.len()
@@ -173,9 +237,10 @@ impl Session {
             return Vec::new();
         }
         match msg {
-            ServerMsg::Joined { peer, seq, roster, locks, .. } => {
+            ServerMsg::Joined { peer, seq, space, roster, locks, .. } => {
                 self.me = Some(peer);
                 self.applied = seq;
+                self.space = (space > 0).then_some(space);
                 self.pending.clear();
                 self.roster = roster.clone();
                 self.remote_locks.clear();
@@ -188,7 +253,13 @@ impl Session {
                         self.remote_locks.insert(l.scope.clone(), l.holder.clone());
                     }
                 }
-                vec![Effect::Roster { roster }, Effect::RemoteLocks { locks }]
+                let mut out = vec![Effect::Roster { roster }, Effect::RemoteLocks { locks }];
+                if let Some(space) = self.space {
+                    out.push(Effect::Space { space });
+                } else {
+                    log::warn!("doc {}: the relay granted no id space, so shared typing stays off", self.doc);
+                }
+                out
             }
 
             op @ ServerMsg::Op { .. } => self.take_op(op),
@@ -220,10 +291,29 @@ impl Session {
                 vec![Effect::LockDropped { scope }]
             }
 
+            ServerMsg::PresenceLock { scope, holder, .. } => {
+                // Somebody else took the scope. Record it so an edit into that
+                // region is held back here rather than refused by the relay, and
+                // tell the app so it can show the region as busy.
+                if self.me.as_deref() == Some(holder.as_str()) {
+                    return Vec::new();
+                }
+                self.held.remove(&scope);
+                self.remote_locks.insert(scope, holder);
+                let locks = self.remote_locks.iter().map(|(scope, holder)| LockState { scope: scope.clone(), holder: holder.clone() }).collect();
+                vec![Effect::RemoteLocks { locks }]
+            }
+
             ServerMsg::Presence { roster, .. } => {
                 self.roster = roster.clone();
                 vec![Effect::Roster { roster }]
             }
+
+            ServerMsg::TextOps { scope, ops, complete, .. } => vec![Effect::TextOps { scope, ops, complete }],
+
+            ServerMsg::Frame { origin, payload, .. } => vec![Effect::Frame { origin, payload }],
+
+            ServerMsg::Ephemeral { origin, kind, payload, .. } => vec![Effect::Ephemeral { origin, kind, payload }],
 
             ServerMsg::Error { detail, .. } => vec![Effect::Notice { detail }],
         }

@@ -113,7 +113,7 @@ fn sub(peer: &str, may_edit: bool, command: &str, params: serde_json::Value, sco
 fn room_with(ids: &[(&str, bool)]) -> Room {
     let mut r = Room::default();
     for (id, may_edit) in ids {
-        r.join(peer(id, *may_edit));
+        let _ = r.join(peer(id, *may_edit));
     }
     r
 }
@@ -165,6 +165,153 @@ fn a_crdt_text_edit_ignores_a_held_lock() {
     assert!(op.scope.is_none(), "a crdt.* command must not keep the client's scope");
 }
 
+/// A document may not grow without bound. The count cap alone left size unbounded, and one
+/// authenticated editor could hold a large multiple of the intended memory per room.
+#[test]
+fn an_oversized_edit_is_refused() {
+    let mut r = room_with(&[("alice", true)]);
+    let big = json!({ "blob": "x".repeat(crate::room::HISTORY_BYTES + 1) });
+    match r.submit(1, sub("alice", true, "cell.set", big, None)) {
+        Err(Refusal::TooLarge { bytes }) => assert!(bytes > crate::room::HISTORY_BYTES),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_document_stops_admitting_peers_at_the_cap() {
+    let mut r = Room::default();
+    for i in 0..crate::room::MAX_PEERS {
+        assert!(r.join(peer(&format!("peer-{i}"), true)).is_ok());
+    }
+    assert_eq!(r.join(peer("one-too-many", true)), Err(Refusal::Full));
+    // A reconnecting peer replaces its own entry and is never refused for being at the cap.
+    assert!(r.join(peer("peer-0", true)).is_ok());
+}
+
+/// A joining peer is replayed the CRDT operations it missed, because the file it is about to
+/// open is behind every edit made since that file was written.
+#[test]
+fn crdt_operations_are_kept_for_a_peer_that_has_not_joined_yet() {
+    let mut r = room_with(&[("alice", true)]);
+    let payload = json!({"scope": "/body/0", "ops": [{"Ins": {"after": null, "id": 1, "ch": "a"}}]});
+    r.submit(1, sub("alice", true, "crdt.text", payload, None)).expect("ok");
+    let log = r.texts().get("/body/0").expect("the scope was retained");
+    assert_eq!(log.ops().len(), 1);
+    assert!(log.complete(), "nothing was dropped, so the text can be rebuilt");
+}
+
+/// Past the per-scope budget the relay says so. Dropping the oldest operations would leave a
+/// replay that cannot be applied, because later ones anchor on characters those created.
+#[test]
+fn a_scope_past_its_budget_is_reported_incomplete() {
+    let mut r = room_with(&[("alice", true)]);
+    let ops = json!([{ "blob": "x".repeat(crate::room::TEXT_BYTES + 1) }]);
+    r.submit(1, sub("alice", true, "crdt.text", json!({"scope": "/body/0", "ops": ops}), None)).expect("ok");
+    let log = r.texts().get("/body/0").expect("the scope is known");
+    assert!(!log.complete());
+    assert!(log.ops().is_empty(), "a partial replay is worse than none, and is not offered");
+}
+
+/// The replay a joining peer receives has to decode as the operation list a client expects.
+/// Keeping each submit's batch nested handed it an array of arrays, and the client answered by
+/// declaring the scope unrecoverable. This drives the whole round trip: two submits in, the
+/// join payload out, and a real `craft_collab::Texts` applying it.
+#[test]
+fn a_replay_rebuilds_the_text_on_a_joining_replica() {
+    use craft_collab::Texts;
+
+    // Alice seeds "base" from the file and types " and more" in two bursts.
+    let mut alice = Texts::in_space(7);
+    alice.seed("/body/0", "base");
+    let first = alice.local_insert("/body/0", 4, " and").expect("seeded and in a space");
+    let second = alice.local_insert("/body/0", 8, " more").expect("seeded and in a space");
+    assert_eq!(alice.render("/body/0").as_deref(), Some("base and more"));
+
+    // Each burst reaches the relay as its own submit.
+    let mut r = room_with(&[("alice", true)]);
+    for (seq, ops) in [(1u64, &first), (2, &second)] {
+        let params = json!({ "scope": "/body/0", "ops": serde_json::to_value(ops).expect("ops encode") });
+        r.submit(seq, sub("alice", true, "crdt.text", params, None)).expect("ok");
+    }
+
+    // Bob joins. He gets the retained operations and the same file.
+    let log = r.texts().get("/body/0").expect("retained");
+    assert!(log.complete());
+    let replay: Vec<craft_crdt::text::TextOp> =
+        serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("the replay decodes as an operation list");
+
+    let mut bob = Texts::in_space(9);
+    assert_eq!(bob.apply("/body/0", &replay), None, "held until the file arrives");
+    assert_eq!(bob.seed("/body/0", "base"), "base and more");
+    assert_eq!(bob.render("/body/0"), alice.render("/body/0"));
+}
+
+/// Issue 27. Alice types "!" into "hello" and saves "hello!" while connected.
+/// The client tells the relay the save reflects that edit, so the operation is
+/// no longer replayed. A joiner that opens the saved file does not apply the "!"
+/// a second time and see "hello!!".
+#[test]
+fn a_save_checkpoint_stops_a_joiner_double_applying_the_saved_text() {
+    use craft_collab::Texts;
+    let mut alice = Texts::in_space(1);
+    alice.seed("/body/0", "hello");
+    let ops = alice.local_insert("/body/0", 5, "!").expect("seeded and in a space");
+    let saved = alice.render("/body/0").expect("rendered");
+    assert_eq!(saved, "hello!");
+
+    let mut r = room_with(&[("alice", true)]);
+    let params = json!({ "scope": "/body/0", "ops": serde_json::to_value(&ops).expect("ops encode") });
+    r.submit(1, sub("alice", true, "crdt.text", params, None)).expect("ok");
+
+    // Alice saves "hello!", which reflects the edit ordered at sequence 1.
+    r.checkpoint(1);
+
+    // Bob joins, loads the saved file, and is replayed nothing.
+    let log = r.texts().get("/body/0").expect("retained");
+    assert!(log.ops().is_empty(), "the saved edit is not replayed again");
+    let replay: Vec<craft_crdt::text::TextOp> = serde_json::from_value(serde_json::Value::Array(log.ops().to_vec())).expect("decodes");
+    let mut bob = Texts::in_space(2);
+    bob.apply("/body/0", &replay);
+    assert_eq!(bob.seed("/body/0", &saved), "hello!", "the file's text is not doubled");
+}
+
+/// Latest wins, and the newest value per kind is what a joining peer is handed.
+#[test]
+fn ephemeral_state_keeps_only_the_newest_value_per_kind() {
+    let mut r = room_with(&[("alice", true)]);
+    r.remember_ephemeral("alice", "camera", json!({"distance": 100})).expect("ok");
+    r.remember_ephemeral("alice", "camera", json!({"distance": 200})).expect("ok");
+    r.remember_ephemeral("alice", "at", json!({"point": [1, 2, 3]})).expect("ok");
+    let state = r.ephemeral();
+    assert_eq!(state.len(), 2, "two kinds, one value each");
+    let camera = state.iter().find(|(_, kind, _)| kind == "camera").expect("camera");
+    assert_eq!(camera.2, json!({"distance": 200}));
+}
+
+#[test]
+fn a_peer_cannot_grow_a_room_by_inventing_kind_names() {
+    let mut r = room_with(&[("alice", true)]);
+    for i in 0..crate::room::MAX_EPHEMERAL_KINDS {
+        r.remember_ephemeral("alice", &format!("kind-{i}"), json!(1)).expect("within the cap");
+    }
+    assert!(r.remember_ephemeral("alice", "one-too-many", json!(1)).is_err());
+    // An existing kind still updates, because that is the latest-wins path and costs nothing.
+    assert!(r.remember_ephemeral("alice", "kind-0", json!(2)).is_ok());
+}
+
+/// Their camera goes with them. A marker left behind would show somebody looking at a part
+/// they are no longer in.
+#[test]
+fn leaving_clears_that_peers_ephemeral_state() {
+    let mut r = room_with(&[("alice", true), ("bob", true)]);
+    r.remember_ephemeral("alice", "camera", json!({"distance": 100})).expect("ok");
+    r.remember_ephemeral("bob", "camera", json!({"distance": 200})).expect("ok");
+    r.leave("alice");
+    let state = r.ephemeral();
+    assert_eq!(state.len(), 1);
+    assert_eq!(state[0].0, "bob");
+}
+
 #[test]
 fn a_crdt_command_still_requires_edit_access() {
     let mut r = room_with(&[("bob", false)]);
@@ -199,7 +346,7 @@ fn unlock_only_releases_your_own() {
 #[test]
 fn rejoining_replaces_the_earlier_connection() {
     let mut r = room_with(&[("alice", true)]);
-    r.join(peer("alice", true));
+    let _ = r.join(peer("alice", true));
     assert_eq!(r.peers().len(), 1, "a reconnect must not duplicate the peer");
 }
 
@@ -319,7 +466,6 @@ mod keyed_links {
             share: "share-99".to_owned(),
             exp,
             max_uses,
-            invite_url: None,
         }
     }
 
@@ -790,7 +936,6 @@ mod keyed_links {
             share: "share-planted".to_owned(),
             exp: now + 3600,
             max_uses: 1,
-            invite_url: None,
         };
         assert!(store.put_keyed_link(&key.handle, &link, 3600).await);
         std::fs::write(&out, key.wire()).expect("the key is written where the shell can read it");
@@ -892,7 +1037,15 @@ mod web {
     }
 
     fn form(csrf: &str, kind: &str, base: &str, action: &str) -> ProviderForm {
-        ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), contacts: String::new(), action: action.to_owned() }
+        ProviderForm {
+            csrf: csrf.to_owned(),
+            kind: kind.to_owned(),
+            base: base.to_owned(),
+            contacts: String::new(),
+            action: action.to_owned(),
+            client_id: String::new(),
+            client_secret: String::new(),
+        }
     }
 
     // ---- entitlement a deployment can change without a redeploy -------------
@@ -908,6 +1061,29 @@ mod web {
 
         let again = Permissions::parse(&typed.default_apps().join(", "), &typed.groups_text());
         assert_eq!(again, typed, "a save of what the page showed changes nothing");
+    }
+
+    #[test]
+    fn a_checkbox_save_keeps_a_grant_for_an_application_that_is_not_hosted() {
+        let mut saved = Permissions::from_checks(&["gridcraft".to_owned()], &["editors".to_owned()], &["0:wordcraft".to_owned()]);
+        let previous = Permissions::parse("gridcraft, missingcraft", "editors: wordcraft, alsomissing");
+        saved.keep_absent(&previous, &["gridcraft".to_owned(), "wordcraft".to_owned()]);
+        assert!(saved.default_apps().contains(&"missingcraft".to_owned()));
+        let editors = saved.group_apps().get("editors").expect("the group");
+        assert!(editors.contains(&"wordcraft".to_owned()));
+        assert!(editors.contains(&"alsomissing".to_owned()));
+    }
+
+    #[test]
+    fn the_apps_page_offers_a_box_per_hosted_application() {
+        let app = service(Permissions::decide("gridcraft", &[]), crate::settings::Settings::decide(None, None, None), &["gridcraft", "wordcraft"]);
+        let entitled = Permissions::decide("gridcraft", &[("editors", "wordcraft")]);
+        let body = pages::apps_body(&app, &signed_in(&["craft-admins"]), &entitled, Source::Stored, None, None);
+        assert!(body.contains("type=\"checkbox\" name=\"default\" value=\"gridcraft\" checked"));
+        assert!(body.contains("type=\"checkbox\" name=\"grant\" value=\"0:wordcraft\" checked"));
+        assert!(body.contains("name=\"group_name\""));
+        assert!(!body.contains("name=\"groups\""), "the comma textarea is gone");
+        assert!(!body.contains("<textarea"));
     }
 
     #[test]
@@ -1164,6 +1340,10 @@ mod web {
             assert!(ProviderConfig::parse(bad, "https://cloud.example.com").is_err(), "{bad:?} must be refused");
         }
         assert!(ProviderConfig::parse("nextcloud", "https://cloud.example.com").is_ok());
+        assert_eq!(
+            ProviderConfig::parse("git", "https://github.com/fpoussin/solidcraft-designs/").expect("accepted").base,
+            "https://github.com/fpoussin/solidcraft-designs"
+        );
     }
 
     #[test]
@@ -1246,12 +1426,13 @@ mod web {
         let one = pages::card("gridcraft");
         assert!(one.contains("href=\"/gridcraft/\""));
         assert!(one.contains("GridCraft"), "a slug reads as the application's name");
+        assert!(one.contains("--app:#1f9d55"), "a known app uses the launcher's brand colour");
         assert_eq!(one, pages::card("gridcraft"), "the same application draws the same card every time");
         assert_ne!(pages::card("wordcraft"), one);
         // An application this binary has never heard of still gets a card.
         let unknown = pages::card("sheetworks");
         assert!(unknown.contains("Sheetworks"));
-        assert!(unknown.contains("--h:"));
+        assert!(unknown.contains("--app:hsl("), "an unknown app still gets a stable colour");
     }
 
     #[test]
@@ -1351,6 +1532,8 @@ mod provider_kinds {
         assert!(link("nextcloud"));
         assert!(!link("owncloud"));
         assert!(!link("webdav"));
+        assert!(!link("google"));
+        assert!(!link("git"));
     }
 
     #[test]
@@ -1384,5 +1567,16 @@ mod provider_kinds {
         assert_eq!(kind_label("owncloud"), "ownCloud");
         assert_eq!(kind_label("webdav"), "WebDAV");
         assert_eq!(kind_label("nextcloud"), "Nextcloud");
+        assert_eq!(kind_label("google"), "Google Drive");
+        assert_eq!(kind_label("git"), "Git");
+    }
+
+    #[test]
+    fn a_connection_handle_round_trips_and_a_legacy_handle_does_not_split() {
+        let id = "ab".repeat(32);
+        let stamped = crate::route::stamp(&id, "file:with:colons");
+        assert_eq!(crate::route::split(&stamped), Some((id.as_str(), "file:with:colons")));
+        assert!(crate::route::split("/Documents/Budget.xlsx").is_none());
+        assert!(crate::route::split("cx:short:file").is_none());
     }
 }

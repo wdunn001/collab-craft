@@ -98,7 +98,9 @@ impl Invitation {
     /// Dropping the hub closes the socket. Prefer [`Invitation::live`] and hold
     /// that value for as long as the document is open.
     pub fn join(&self) -> craft_collab::Result<WebHub> {
-        WebHub::connect(&self.join.relay, &self.join.token)
+        // A recipient's invitation reads the document fresh every time, so there is no prior
+        // session to resume.
+        WebHub::connect(&self.join.relay, &self.join.token, None)
     }
 
     /// Connect and keep the session. Same as [`join`], then wrap the hub so

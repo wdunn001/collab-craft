@@ -41,12 +41,19 @@ impl NativeHub {
     /// `url` is the relay root. `token` is what the Nextcloud app minted; it
     /// travels in the Socket.IO handshake auth, so it never appears in a query
     /// string and therefore never lands in an access log.
-    pub async fn connect(url: &str, token: &str) -> Result<NativeHub> {
+    ///
+    /// `applied` is the sequence this connection has already applied, when it is resuming a
+    /// [`crate::Session`] rather than opening the document fresh. Pass `Session::applied()`
+    /// when reconnecting with a session that survived the drop, and `None` on a first join or
+    /// after reloading the file. The relay joins at `applied` when it is given and at the
+    /// saved file's sequence otherwise, so a reconnect is caught up on exactly what it missed
+    /// rather than on what the file happened to be saved at.
+    pub async fn connect(url: &str, token: &str, applied: Option<u64>) -> Result<NativeHub> {
         let (in_tx, inbox) = unbounded_channel::<ServerMsg>();
         let (outbox, mut out_rx) = unbounded_channel::<ClientMsg>();
         let connected = Arc::new(AtomicBool::new(false));
 
-        let mut builder = ClientBuilder::new(url).auth(serde_json::json!({ "token": token }));
+        let mut builder = ClientBuilder::new(url).auth(serde_json::json!({ "token": token, "applied": applied }));
 
         // "error" is in the list because the relay reports its own refusals
         // that way, and an app needs to show them rather than have them

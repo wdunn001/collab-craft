@@ -16,6 +16,12 @@ pub fn doc_from_token(token: &str) -> Option<String> {
     let payload = token.split('.').next()?;
     let json = base64url(payload)?;
     let v: Json = serde_json::from_slice(&json).ok()?;
+    // The service signs the room as `rm` (see the relay's token.rs). `fid` is
+    // the legacy PHP claim. Reading `rm` first is what lets a reopened document
+    // find the room it already has rather than minting a second one.
+    if let Some(rm) = v.get("rm").and_then(Json::as_str) {
+        return Some(format!("doc:{rm}"));
+    }
     let fid = v.get("fid")?.as_u64()?;
     Some(format!("doc:{fid}"))
 }
@@ -57,6 +63,16 @@ mod tests {
         let payload = "eyJmaWQiOjQyfQ";
         assert_eq!(doc_from_token(payload).as_deref(), Some("doc:42"));
         assert_eq!(doc_from_token(&format!("{payload}.sig")).as_deref(), Some("doc:42"));
+    }
+
+    #[test]
+    fn reads_the_room_claim() {
+        // {"rm":"77"} unpadded base64url. The service signs the room as `rm`, so
+        // a reopened document must resolve to the same room rather than falling
+        // through to the legacy file-id path.
+        let payload = "eyJybSI6Ijc3In0";
+        assert_eq!(doc_from_token(payload).as_deref(), Some("doc:77"));
+        assert_eq!(doc_from_token(&format!("{payload}.sig")).as_deref(), Some("doc:77"));
     }
 
     #[test]

@@ -580,6 +580,16 @@ fn the_xml_reader_ignores_namespace_prefixes() {
 }
 
 #[test]
+fn the_xml_reader_decodes_entity_references() {
+    // A name with an ampersand, a less-than written as an entity, and numeric
+    // references both decimal and hex. Dropping any of these corrupts a file
+    // name the user typed.
+    let doc = r#"<r><response><href>/Research &amp; Development &lt;v2&gt; &#38; &#x41;.docx</href></response></r>"#;
+    let groups = crate::xml::groups(doc.as_bytes(), "response").expect("parses");
+    assert_eq!(groups[0].get("href"), Some("/Research & Development <v2> & A.docx"));
+}
+
+#[test]
 fn the_xml_reader_keeps_repeated_leaves() {
     let doc = r#"<r><response><href>/a</href><href>/b</href></response></r>"#;
     let groups = crate::xml::groups(doc.as_bytes(), "response").expect("parses");

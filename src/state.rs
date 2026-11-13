@@ -92,6 +92,11 @@ impl Permissions {
     /// The group half arrives as one line per group, `group: app, app`. A
     /// repeating pair of fields would need script to add a row, and this page
     /// works without any.
+    ///
+    /// Not wired into a route yet; the checkbox builder below is what the setup page actually
+    /// posts to. Kept, and exercised by this module's own round-trip test, for the free-text
+    /// variant of that page should one ever ship.
+    #[allow(dead_code, reason = "exercised by this module's own test; see the comment above")]
     pub fn parse(default: &str, groups: &str) -> Permissions {
         let mut by_group = BTreeMap::new();
         for line in groups.lines() {
@@ -110,8 +115,75 @@ impl Permissions {
     }
 
     /// The group half, as the setup page's textarea wants it back.
+    #[allow(dead_code, reason = "paired with `parse`, above, which is in the same position")]
     pub fn groups_text(&self) -> String {
         self.by_group.iter().map(|(group, apps)| format!("{group}: {}\n", apps.join(", "))).collect()
+    }
+
+    /// Build one from the checkbox page.
+    ///
+    /// `default` is the hosted apps checked for everybody. `names` is one
+    /// group name per block, in order. `grants` is `index:app` for each box
+    /// checked inside a block. An empty group name is a block still being
+    /// filled in, and grants nothing.
+    pub fn from_checks(default: &[String], names: &[String], grants: &[String]) -> Permissions {
+        let mut by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in names {
+            let group = name.trim().to_ascii_lowercase();
+            if !group.is_empty() {
+                by_group.entry(group).or_default();
+            }
+        }
+        for grant in grants {
+            let Some((index, app)) = grant.split_once(':') else { continue };
+            let Ok(index) = index.parse::<usize>() else { continue };
+            let Some(name) = names.get(index) else { continue };
+            let group = name.trim().to_ascii_lowercase();
+            let app = app.trim();
+            if group.is_empty() || app.is_empty() {
+                continue;
+            }
+            by_group.entry(group).or_default().push(app.to_owned());
+        }
+        for apps in by_group.values_mut() {
+            apps.sort();
+            apps.dedup();
+        }
+        let mut default: Vec<String> = default.iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+        default.sort();
+        default.dedup();
+        Permissions { default, by_group }
+    }
+
+    /// Keep grants for applications this deployment does not host.
+    ///
+    /// Those apps are not on the checkbox page, so a save of the boxes would
+    /// otherwise drop them. They stay granted until the application is hosted
+    /// and somebody unchecks it, or until the stored entitlement is cleared.
+    pub fn keep_absent(&mut self, previous: &Permissions, hosted: &[String]) {
+        let present = |name: &str| hosted.iter().any(|hosted| hosted.eq_ignore_ascii_case(name));
+        for name in &previous.default {
+            if !present(name) && !self.default.iter().any(|have| have == name) {
+                self.default.push(name.clone());
+            }
+        }
+        self.default.sort();
+        self.default.dedup();
+        for (group, apps) in &previous.by_group {
+            for app in apps {
+                if present(app) {
+                    continue;
+                }
+                let slot = self.by_group.entry(group.clone()).or_default();
+                if !slot.iter().any(|have| have == app) {
+                    slot.push(app.clone());
+                }
+            }
+        }
+        for apps in self.by_group.values_mut() {
+            apps.sort();
+            apps.dedup();
+        }
     }
 }
 
@@ -242,13 +314,56 @@ impl App {
     /// is what lets somebody with no account open it, and it is why the
     /// recipient never holds a credential of any kind.
     pub async fn provider_for_owner(&self, user: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
-        let (config, _) = self.provider_config().await?;
-        let link = self.store.provider_link(user).await?;
-        let provider = provider_from(&config, &link.user, &link.password);
-        if provider.is_none() {
-            tracing::error!(kind = %config.kind, "this service does not implement that kind of provider");
+        let legacy = match self.provider_config().await {
+            Some((config, _)) => {
+                let link = self.store.provider_link(user).await;
+                // Use the stored credential only against the provider it was
+                // issued for. A link whose bound address or kind no longer
+                // matches the deployment's is refused rather than sent on: that
+                // is what stops a changed address (or a record written straight
+                // to the bus) from re-pointing every app password at another
+                // host. An exact base match includes the scheme, so an
+                // `https://` credential is also withheld from an `http://`
+                // downgrade of the same host. An empty bound address is a record
+                // written before binding existed; refuse it and let the user
+                // relink rather than trust it for the rest of its 90-day life.
+                link.filter(|link| !link.base.is_empty() && link.base == config.base && (link.kind.is_empty() || link.kind == config.kind))
+                    .and_then(|link| provider_from(&config, &link.user, &link.password))
+            }
+            None => None,
+        };
+        let connections = self.store.connections(user).await;
+        if connections.is_empty() {
+            return legacy;
         }
-        provider
+        let mut built = Vec::new();
+        let mut default_id = None;
+        for connection in connections {
+            let config = crate::settings::ProviderConfig {
+                kind: connection.kind.clone(),
+                base: connection.base.clone(),
+                contacts: connection.contacts.clone(),
+            };
+            let provider = if connection.kind == "google" {
+                let client = connection.client_id.clone();
+                let secret = self.store.google_secret().await.unwrap_or_default();
+                Some(Arc::new(crate::google::Drive::new(client, secret, connection.secret.clone())) as Arc<dyn Provider + Send + Sync>)
+            } else {
+                provider_from(&config, &connection.user, &connection.secret)
+            };
+            let Some(provider) = provider else { continue };
+            if connection.default {
+                default_id = Some(connection.id.clone());
+            }
+            built.push((connection.id, provider));
+        }
+        if built.is_empty() {
+            return legacy;
+        }
+        if default_id.is_none() && legacy.is_none() {
+            default_id = built.first().map(|(id, _)| id.clone());
+        }
+        Some(Arc::new(crate::route::Routed::new(legacy, built, default_id)))
     }
 
     /// Sign a relay token for one room.
@@ -272,9 +387,11 @@ impl App {
 /// a `dyn Provider` and never learns which it got.
 pub fn provider_from(config: &crate::settings::ProviderConfig, user: &str, password: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
     match config.kind.as_str() {
-        "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
-        "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp::default()))),
-        "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp::default()))),
+        "nextcloud" => Some(Arc::new(Nextcloud::new(Account::new(config.base.clone(), user, password), ReqwestHttp))),
+        "owncloud" => Some(Arc::new(Nextcloud::owncloud(Account::new(config.base.clone(), user, password), ReqwestHttp))),
+        "webdav" => Some(Arc::new(WebDav::new(&config.layout(), user, password, ReqwestHttp))),
+        "google" => Some(Arc::new(crate::google::Drive::new(String::new(), String::new(), password))),
+        "git" => Some(Arc::new(crate::git::Git::new(&config.base, user, password))),
         _ => None,
     }
 }

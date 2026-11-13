@@ -1,0 +1,36 @@
+name: CI
+
+# Format, lint, test and the feature-gated example, on every push and PR.
+#
+# Runs on the .88 forgejo-runner. The job runs inside rust:1.95-bookworm rather
+# than the runner's default node image, so cargo is present without a rustup
+# download. The repo is cloned over the internal Forgejo endpoint rather than
+# through actions/checkout, which would need node in this container.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: docker
+    container: rust:1.95-bookworm
+    env:
+      REPO_TOKEN: ${{ github.token }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: fmt, clippy, test, example
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git pkg-config libssl-dev >/dev/null
+          git clone -q "http://token:${REPO_TOKEN}@192.168.1.88:8530/${GITHUB_REPOSITORY}.git" /src
+          cd /src && git checkout -q "${GITHUB_SHA}"
+          rustup component add rustfmt clippy >/dev/null
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          # The feature-gated desktop example is not built by the line above.
+          cargo build -p craft-collab --example join --features native-hub

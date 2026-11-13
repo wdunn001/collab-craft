@@ -25,7 +25,7 @@ use crate::session::Session;
 /// `webdav` is every server speaking RFC 4918, which is most of them: SabreDAV,
 /// Apache, nginx, Seafile, a NAS, ownCloud Infinite Scale. It has no sharing,
 /// so the share controls disappear and everything else works.
-pub const KINDS: [&str; 3] = ["nextcloud", "owncloud", "webdav"];
+pub const KINDS: [&str; 5] = ["nextcloud", "owncloud", "webdav", "google", "git"];
 
 /// What to call a kind in a heading.
 pub fn kind_label(kind: &str) -> String {
@@ -33,6 +33,8 @@ pub fn kind_label(kind: &str) -> String {
         "nextcloud" => "Nextcloud".to_owned(),
         "owncloud" => "ownCloud".to_owned(),
         "webdav" => "WebDAV".to_owned(),
+        "google" => "Google Drive".to_owned(),
+        "git" => "Git".to_owned(),
         other => crate::pages::capitalise(other),
     }
 }
@@ -65,6 +67,11 @@ impl ProviderConfig {
         let kind = kind.trim().to_ascii_lowercase();
         if !KINDS.contains(&kind.as_str()) {
             return Err("this service does not implement that kind of provider");
+        }
+        // Google has no server of the deployment's to name. The public API
+        // address is fixed, so a blank field is that address and not a mistake.
+        if kind == "google" && base.trim().is_empty() {
+            return Ok(ProviderConfig { kind, base: "https://www.googleapis.com".to_owned(), contacts: None });
         }
         let base = base.trim().trim_end_matches('/').to_owned();
         let rest =
@@ -218,14 +225,17 @@ impl Settings {
 pub async fn probe(config: &ProviderConfig) -> Result<(), String> {
     let config = config.clone();
     let probing = tokio::task::spawn_blocking(move || match config.kind.as_str() {
-        "nextcloud" => craft_nextcloud::begin(&crate::transport::ReqwestHttp::default(), &config.base).map(|_| ()).map_err(|e| e.to_string()),
-        "owncloud" => match craft_nextcloud::status(&crate::transport::ReqwestHttp::default(), &config.base) {
+        "nextcloud" => craft_nextcloud::begin(&crate::transport::ReqwestHttp, &config.base).map(|_| ()).map_err(|e| e.to_string()),
+        "owncloud" => match craft_nextcloud::status(&crate::transport::ReqwestHttp, &config.base) {
             Ok(s) if !s.installed => Err("the server answered and is not installed yet".to_owned()),
             Ok(s) if s.maintenance => Err("the server answered and is in maintenance mode".to_owned()),
             Ok(_) => Ok(()),
             Err(e) => Err(e.to_string()),
         },
-        "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp::default(), &config.layout()),
+        "webdav" => craft_webdav::probe(&crate::transport::ReqwestHttp, &config.layout()),
+        // Nothing to dial. The client id is checked when somebody connects.
+        "google" => Ok(()),
+        "git" => crate::git::probe(&config.base),
         other => Err(format!("this service does not implement a {other} provider")),
     })
     .await;
@@ -239,4 +249,41 @@ pub async fn probe(config: &ProviderConfig) -> Result<(), String> {
 
 fn var(key: &str) -> Option<String> {
     std::env::var(key).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// One kind this deployment allows people to connect, in addition to the
+/// provider the legacy link uses.
+///
+/// The secret for an OAuth kind is not here. It lives in the environment or
+/// in a separate bus record, so a page that renders this struct cannot echo it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offer {
+    pub kind: String,
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+}
+
+impl Offer {
+    pub fn from_config(config: &ProviderConfig) -> Offer {
+        Offer { kind: config.kind.clone(), base: config.base.clone(), contacts: config.contacts.clone(), client_id: String::new() }
+    }
+
+    pub fn config(&self) -> ProviderConfig {
+        ProviderConfig { kind: self.kind.clone(), base: self.base.clone(), contacts: self.contacts.clone() }
+    }
+}
+
+/// The Nextcloud this deployment was told about, if the operator set one.
+///
+/// Read when a page is drawn. Nothing here is compiled into the binary.
+pub fn nextcloud_from_env() -> Option<String> {
+    var("COLLABCRAFT_NEXTCLOUD_URL").and_then(|raw| ProviderConfig::parse("nextcloud", &raw).ok()).map(|config| config.base)
+}
+
+/// OAuth client id for Google Drive, from the environment.
+pub fn google_client_from_env() -> Option<String> {
+    var("COLLABCRAFT_GOOGLE_CLIENT_ID")
 }

@@ -116,6 +116,18 @@ pub(crate) fn groups(doc: &[u8], group: &str) -> Result<Vec<Group>> {
                     text.push_str(&String::from_utf8_lossy(e.as_ref()));
                 }
             }
+            // An entity reference. quick-xml reports `&amp;`, `&#38;` and the
+            // like as their own event rather than as part of the surrounding
+            // text, so without this arm the catch-all below dropped them and
+            // `Research &amp; Development.docx` arrived as `Research  Development.docx`.
+            Ok(Event::GeneralRef(e)) => {
+                if leaf_open
+                    && group_at.is_some()
+                    && let Some(ch) = resolve_entity(&e)
+                {
+                    text.push(ch);
+                }
+            }
             Ok(Event::End(_)) => {
                 let closed = path.pop();
                 if let (Some(name), Some(depth)) = (closed.as_deref(), group_at) {
@@ -143,6 +155,32 @@ pub(crate) fn groups(doc: &[u8], group: &str) -> Result<Vec<Group>> {
 /// Read the single outermost group, for documents that carry exactly one (the OCS envelope).
 pub(crate) fn one_group(doc: &[u8], group: &str) -> Result<Group> {
     groups(doc, group)?.into_iter().next().ok_or_else(|| Error::malformed("xml", format!("no <{group}> element")))
+}
+
+/// Resolve one entity reference to its character.
+///
+/// The five XML predefined entities, plus decimal and hexadecimal numeric
+/// character references. An entity this does not know is dropped rather than
+/// guessed, which is the same lenient choice the text decoder makes.
+fn resolve_entity(e: &quick_xml::events::BytesRef) -> Option<char> {
+    let decoded = e.decode().ok()?;
+    let name = decoded.as_ref();
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        // Numeric character references, decimal (`&#38;`) and hex (`&#x26;`).
+        _ => {
+            let num = name.strip_prefix('#')?;
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
 }
 
 /// Strip any namespace prefix from a qualified name.

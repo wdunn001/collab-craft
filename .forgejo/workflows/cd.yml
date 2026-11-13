@@ -1,0 +1,78 @@
+name: Deploy to craft.quasarke.net
+
+# Build the service image on .88 from this commit and recreate the live stack.
+#
+# Same shape as homelab-compose's cd-eqemu.yml: the runner holds a deploy key,
+# SSHes to vinez@192.168.1.88, and does the native host work there. The image is
+# a local tag the compose at /mnt/data/collabcraft-stack references, so building
+# it on the host is all the "push" there is. The previous image is tagged
+# collabcraft:rollback first, so a bad build can be reverted with one retag.
+#
+# One-time setup: add the repo secret COLLABCRAFT_DEPLOY_SSH_KEY, a private key
+# whose public half is in vinez@192.168.1.88's authorized_keys. Until it is set
+# the job logs that and exits green rather than failing every push.
+#
+# This deploy carries the security-review changes. Two of them are operational:
+# the device sign-in flow now needs the desktop client to show its user code,
+# and provider links stored before this change are refused, so a linked user
+# relinks once. See the pull request for the full list.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Dockerfile'
+      - '.forgejo/workflows/cd.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: docker
+    env:
+      REPO_TOKEN: ${{ github.token }}
+      DEPLOY_KEY: ${{ secrets.COLLABCRAFT_DEPLOY_SSH_KEY }}
+    steps:
+      - name: Build and redeploy on .88
+        run: |
+          set -eu
+          if [ -z "${DEPLOY_KEY:-}" ]; then
+            echo "COLLABCRAFT_DEPLOY_SSH_KEY is not set. Configure it to enable deploys (see this workflow's header). Exiting green so this reads as not-configured rather than failed."
+            exit 0
+          fi
+
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client rsync >/dev/null
+
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H 192.168.1.88 >> ~/.ssh/known_hosts 2>/dev/null
+
+          git clone -q "http://token:${REPO_TOKEN}@192.168.1.88:8530/${GITHUB_REPOSITORY}.git" /tmp/repo
+          cd /tmp/repo && git checkout -q "${GITHUB_SHA}"
+
+          rsync -a --delete --exclude=target --exclude=.git -e "ssh -i ~/.ssh/id_ed25519" \
+            ./ vinez@192.168.1.88:/home/vinez/collab-craft-deploy/
+
+          ssh -i ~/.ssh/id_ed25519 vinez@192.168.1.88 '
+            set -eu
+            cd ~/collab-craft-deploy
+            docker tag collabcraft:latest collabcraft:rollback || true
+            docker build -t collabcraft:latest .
+            cd /mnt/data/collabcraft-stack
+            docker compose up -d collabcraft
+            # The compose binds the port on the LAN address, not loopback, so the
+            # healthcheck uses that address rather than 127.0.0.1.
+            for i in $(seq 1 20); do
+              if curl -fsS http://192.168.1.88:9451/healthz >/dev/null; then
+                echo "collabcraft healthy"; exit 0
+              fi
+              sleep 3
+            done
+            echo "collabcraft did not become healthy; roll back with: docker tag collabcraft:rollback collabcraft:latest && docker compose up -d collabcraft" >&2
+            exit 1
+          '

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use craft_cloud::Permission;
 use serde::Serialize;
@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::api::ApiError;
 use crate::keyed::{self, Key, Link, Refusal};
 // One escaper for every page this service renders. Two would be one too many.
-use crate::pages::escape;
+use crate::pages::{escape, layout};
 use crate::session::{GUEST_COOKIE, Guest, InviteSession, Session, random_id};
 use crate::state::App;
 
@@ -37,13 +37,60 @@ fn refuse(refusal: &Refusal, status: StatusCode) -> Response {
     (status, Html(page(refusal.public()))).into_response()
 }
 
-/// Mint the session a recipient carries, and land them in the document.
+/// Show a keyed link's recipient what they are about to open, without spending
+/// it. The GET half of the landing.
 ///
-/// The key is spent here and the session takes over, so a reload works while
-/// the link itself is already used up. That ordering matters: a single-use
-/// link whose landing page could not be reloaded would be a link that works
-/// once and then appears broken to the person who just opened it.
-pub async fn land(State(app): State<Arc<App>>, Path(raw): Path<String>) -> Response {
+/// Nothing here mutates. A key is spent only by the POST from the button below,
+/// which a prefetch, an unfurl, a HEAD probe or a mail-gateway link scanner
+/// never sends. Before this split a plain GET spent the key, so the scanner in
+/// front of the recipient's inbox opened the document once and the recipient
+/// then saw a link that did not work.
+///
+/// A refusal that is already certain (unknown, expired, spent, withdrawn) is
+/// shown here rather than behind the button, so a dead link reads as dead
+/// straight away.
+pub async fn offer(State(app): State<Arc<App>>, headers: HeaderMap, Path(raw): Path<String>) -> Response {
+    if !app.keyed.enabled() {
+        return refuse(&Refusal::Disabled, StatusCode::NOT_FOUND);
+    }
+    let key = match Key::parse(&raw) {
+        Ok(k) => k,
+        Err(e) => return refuse(&e, StatusCode::BAD_REQUEST),
+    };
+    let Some(link) = app.store.keyed_link(&key.handle).await else {
+        return refuse(&Refusal::Unknown, StatusCode::NOT_FOUND);
+    };
+
+    // A recipient who already confirmed holds a guest cookie for this exact
+    // link. Send them straight back into the document, spending nothing, so
+    // reopening the mail (or the link opening in a second browser jar) works
+    // instead of refusing as already spent.
+    if let Some(id) = crate::api::cookie_value(&headers, GUEST_COOKIE)
+        && let Some(session) = app.store.session(&id).await
+        && session.guest.as_ref().is_some_and(|g| g.link == key.handle)
+    {
+        return Html(handoff(&link.app, &id, app.keyed.base())).into_response();
+    }
+
+    // Read-only checks, so a dead link refuses here with no side effect.
+    let spent = app.store.keyed_uses(&key.handle).await;
+    if let Err(e) = keyed::redeem(&app.secret, &link, &key, spent, now_unix()) {
+        return refuse(&e, StatusCode::FORBIDDEN);
+    }
+    if let Err(e) = grant(&app, &link).await {
+        return refuse(&e, StatusCode::FORBIDDEN);
+    }
+
+    Html(confirm_page(&raw, &link)).into_response()
+}
+
+/// Spend the key and land the recipient in the document. The POST half.
+///
+/// Reached only from the button [`offer`] renders, so a request that gets here
+/// is a person who chose to open the document, not a machine that followed the
+/// URL. The session takes over once it is minted, so a reload works while the
+/// link itself is used up.
+pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, Path(raw): Path<String>) -> Response {
     if !app.keyed.enabled() {
         return refuse(&Refusal::Disabled, StatusCode::NOT_FOUND);
     }
@@ -55,6 +102,17 @@ pub async fn land(State(app): State<Arc<App>>, Path(raw): Path<String>) -> Respo
     let Some(link) = app.store.keyed_link(&key.handle).await else {
         return refuse(&Refusal::Unknown, StatusCode::NOT_FOUND);
     };
+
+    // Idempotent for the genuine recipient: a second confirm from a browser that
+    // already holds this link's guest session reuses it rather than spending
+    // another use.
+    if let Some(id) = crate::api::cookie_value(&headers, GUEST_COOKIE)
+        && let Some(session) = app.store.session(&id).await
+        && session.guest.as_ref().is_some_and(|g| g.link == key.handle)
+    {
+        return Html(handoff(&link.app, &id, app.keyed.base())).into_response();
+    }
+
     let spent = app.store.keyed_uses(&key.handle).await;
     if let Err(e) = keyed::redeem(&app.secret, &link, &key, spent, now_unix()) {
         return refuse(&e, StatusCode::FORBIDDEN);
@@ -331,16 +389,27 @@ pub(crate) fn handoff(app_slug: &str, session_id: &str, base: &str) -> String {
     )
 }
 
+/// The interstitial a recipient confirms before the key is spent.
+///
+/// One button, which posts back to the same path. The POST is the whole of the
+/// defence: a link scanner, a prefetch or a HEAD probe issues a GET and lands
+/// here, and none of them presses a button. The key already carries the secret,
+/// so this needs no CSRF token: anybody able to forge the POST already holds
+/// the link and has nothing to gain by tricking a victim into opening it.
+fn confirm_page(raw: &str, link: &Link) -> String {
+    let action = format!("/invite/{}", escape(raw));
+    let body = format!(
+        "<h1>Open this document</h1>\
+         <p>This link was sent to {recipient}. It opens one document, and it can be opened once.</p>\
+         <form method=\"post\" action=\"{action}\"><button type=\"submit\">Open the document</button></form>",
+        recipient = escape(&link.recipient),
+    );
+    layout("Open this document", None, &body)
+}
+
 /// One refusal, as a page rather than JSON, because a person is reading it.
 fn page(message: &str) -> String {
-    format!(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <meta name=\"referrer\" content=\"no-referrer\">\
-         <title>This link does not work</title></head>\
-         <body><h1>This link does not work</h1><p>{}</p></body></html>\n",
-        escape(message)
-    )
+    layout("This link does not work", None, &format!("<h1>This link does not work</h1><p>{}</p>", escape(message)))
 }
 
 fn now_unix() -> i64 {
